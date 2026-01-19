@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDEs
+.vscode/
+.idea/
+
+# Environment / secrets
+config.json
+.env
+.env.*
+secrets.json
+
+# Distribution / build
+build/
+dist/
+*.egg-info/
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# OneDrive temp
+~$*
+
+# Others
+*.sqlite3
+*.db
+*.pyc
+
+# Documentation (keep) - include unless you want to ignore large docs
+# api docs/
