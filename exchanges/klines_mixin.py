@@ -4,7 +4,7 @@ This module contains helper functions for calculating timestamps and intervals.
 """
 
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Tuple, Dict
 
 # Standard interval mappings for each exchange
@@ -81,6 +81,7 @@ INTERVAL_MINUTES = {
 def get_seven_day_timestamps(interval: str = '1h') -> Tuple[int, int]:
     """
     Calculate start and end timestamps for 7 days of data.
+    Uses timezone-aware UTC datetime for accurate timestamp calculation.
     
     Args:
         interval: The kline interval
@@ -88,7 +89,8 @@ def get_seven_day_timestamps(interval: str = '1h') -> Tuple[int, int]:
     Returns:
         Tuple of (start_timestamp_ms, end_timestamp_ms)
     """
-    now = datetime.utcnow()
+    # Use timezone-aware UTC time for accuracy
+    now = datetime.now(timezone.utc)
     end_time = now
     start_time = now - timedelta(days=7)
     
@@ -102,6 +104,7 @@ def get_seven_day_timestamps_seconds(interval: str = '1h') -> Tuple[int, int]:
     """
     Calculate start and end timestamps in SECONDS for 7 days of data.
     Used by Gate.io, HTX, MEXC which use seconds.
+    Uses timezone-aware UTC datetime for accurate timestamp calculation.
     
     Args:
         interval: The kline interval
@@ -109,7 +112,8 @@ def get_seven_day_timestamps_seconds(interval: str = '1h') -> Tuple[int, int]:
     Returns:
         Tuple of (start_timestamp_sec, end_timestamp_sec)
     """
-    now = datetime.utcnow()
+    # Use timezone-aware UTC time for accuracy
+    now = datetime.now(timezone.utc)
     end_time = now
     start_time = now - timedelta(days=7)
     
