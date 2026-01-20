@@ -186,3 +186,189 @@ class BitgetExchange(BaseExchange):
         
         logger.info(f"Bitget: Successfully fetched {len(result)} spot prices")
         return result
+    
+    async def get_klines_futures(self, symbol: str, interval: str = '1h', start_time: int = None, end_time: int = None) -> list:
+        """Fetch kline/candlestick data for futures - 1 MONTH of data
+        
+        Args:
+            symbol: Trading symbol (e.g., 'BTCUSDT')
+            interval: Kline interval (1m, 5m, 15m, 30m, 1h, 4h, 1d, etc.)
+            start_time: Start timestamp in milliseconds (optional, defaults to 30 days ago)
+            end_time: End timestamp in milliseconds (optional, defaults to now)
+        
+        Returns:
+            List of klines: [{time, open, high, low, close, volume}, ...]
+        """
+        from .klines_mixin import get_one_month_timestamps, get_exchange_interval, INTERVAL_MINUTES
+        
+        if start_time is None or end_time is None:
+            start_time, end_time = get_one_month_timestamps()
+        
+        # Bitget V2 API uses plain symbol (e.g., 'BTCUSDT') with productType parameter
+        # Remove _UMCBL suffix if present
+        if symbol.endswith('_UMCBL'):
+            symbol = symbol[:-6]
+        
+        # Convert interval to Bitget futures format (1m, 5m, 1H, 4H, 1D, etc.)
+        granularity = get_exchange_interval('bitget_futures', interval)
+        
+        endpoint = "/api/v2/mix/market/candles"
+        
+        all_klines = []
+        max_limit = 1000
+        
+        # Calculate interval in milliseconds for pagination
+        interval_minutes = INTERVAL_MINUTES.get(interval, 60)
+        interval_ms = interval_minutes * 60 * 1000
+        
+        # Bitget returns most recent data first when endTime is specified
+        # We need to paginate backwards from end_time
+        current_end = end_time
+        
+        while current_end > start_time:
+            params = {
+                'symbol': symbol,
+                'productType': 'USDT-FUTURES',
+                'granularity': granularity,
+                'endTime': str(current_end),
+                'limit': str(max_limit)
+            }
+            
+            response = await self._make_bitget_request(endpoint, params=params)
+            
+            if 'data' not in response or not isinstance(response['data'], list) or len(response['data']) == 0:
+                break
+            
+            batch_klines = []
+            for kline in response['data']:
+                try:
+                    kline_time = int(kline[0]) / 1000  # Convert to seconds
+                    kline_time_ms = int(kline[0])
+                    # Only include if within our time range
+                    if kline_time_ms >= start_time:
+                        batch_klines.append({
+                            'time': kline_time,
+                            'open': float(kline[1]),
+                            'high': float(kline[2]),
+                            'low': float(kline[3]),
+                            'close': float(kline[4]),
+                            'volume': float(kline[5]) if len(kline) > 5 else 0
+                        })
+                except Exception as e:
+                    logger.debug(f"Bitget: Error processing kline {kline}: {str(e)}")
+                    continue
+            
+            all_klines.extend(batch_klines)
+            
+            # Move backwards - find earliest timestamp in this batch
+            earliest_time = min(int(k[0]) for k in response['data'])
+            if earliest_time <= start_time:
+                break
+            current_end = earliest_time - 1
+        
+        # Remove duplicates and sort
+        seen = set()
+        unique_klines = []
+        for kline in all_klines:
+            if kline['time'] not in seen:
+                seen.add(kline['time'])
+                unique_klines.append(kline)
+        
+        unique_klines.sort(key=lambda x: x['time'])
+        logger.info(f"Bitget Futures: Fetched {len(unique_klines)} klines for {symbol}")
+        return unique_klines
+    
+    async def get_klines_spot(self, symbol: str, interval: str = '1h', start_time: int = None, end_time: int = None) -> list:
+        """Fetch kline/candlestick data for spot - 7 days of data
+        
+        Args:
+            symbol: Trading symbol (e.g., 'BTCUSDT')
+            interval: Kline interval (1m, 5m, 15m, 30m, 1h, 4h, 1d, etc.)
+            start_time: Start timestamp in milliseconds (optional, defaults to 7 days ago)
+            end_time: End timestamp in milliseconds (optional, defaults to now)
+        
+        Returns:
+            List of klines: [{time, open, high, low, close, volume}, ...]
+        """
+        from .klines_mixin import get_one_month_timestamps, get_exchange_interval, INTERVAL_MINUTES
+        
+        if start_time is None or end_time is None:
+            start_time, end_time = get_one_month_timestamps()
+        
+        # Convert interval to Bitget spot format (1min, 5min, 1h, 1day, etc.)
+        granularity = get_exchange_interval('bitget_spot', interval)
+        
+        endpoint = "/api/v2/spot/market/history-candles"
+        
+        all_klines = []
+        max_limit = 200
+        
+        # Calculate interval in milliseconds for pagination
+        interval_minutes = INTERVAL_MINUTES.get(interval, 60)
+        interval_ms = interval_minutes * 60 * 1000
+        
+        # Paginate backwards from end_time
+        current_end = end_time
+        max_iterations = 200  # Safety limit to prevent infinite loops
+        iteration = 0
+        
+        while current_end > start_time and iteration < max_iterations:
+            iteration += 1
+            
+            params = {
+                'symbol': symbol,
+                'granularity': granularity,
+                'endTime': str(current_end),
+                'limit': str(max_limit)
+            }
+            
+            response = await self._make_bitget_request(endpoint, params=params)
+            
+            if 'data' not in response or not isinstance(response['data'], list) or len(response['data']) == 0:
+                logger.debug(f"Bitget Spot: No more data at iteration {iteration}")
+                break
+            
+            batch_klines = []
+            for kline in response['data']:
+                try:
+                    kline_time = int(kline[0]) / 1000  # Convert to seconds
+                    kline_time_ms = int(kline[0])
+                    if kline_time_ms >= start_time:
+                        batch_klines.append({
+                            'time': kline_time,
+                            'open': float(kline[1]),
+                            'high': float(kline[2]),
+                            'low': float(kline[3]),
+                            'close': float(kline[4]),
+                            'volume': float(kline[5]) if len(kline) > 5 else 0
+                        })
+                except Exception as e:
+                    logger.debug(f"Bitget: Error processing kline {kline}: {str(e)}")
+                    continue
+            
+            all_klines.extend(batch_klines)
+            logger.debug(f"Bitget Spot: Iteration {iteration}, got {len(batch_klines)} klines, total: {len(all_klines)}")
+            
+            # Move backwards - find earliest timestamp in this batch
+            earliest_time = min(int(k[0]) for k in response['data'])
+            if earliest_time <= start_time:
+                logger.debug(f"Bitget Spot: Reached start_time at iteration {iteration}")
+                break
+            
+            # Move to just before the earliest time we got
+            current_end = earliest_time - 1
+            
+            # Add small delay to respect rate limits
+            await asyncio.sleep(0.05)
+        
+        # Remove duplicates and sort
+        seen = set()
+        unique_klines = []
+        for kline in all_klines:
+            if kline['time'] not in seen:
+                seen.add(kline['time'])
+                unique_klines.append(kline)
+        
+        unique_klines.sort(key=lambda x: x['time'])
+        logger.info(f"Bitget Spot: Fetched {len(unique_klines)} klines for {symbol}")
+        return unique_klines

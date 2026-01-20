@@ -130,3 +130,157 @@ class OKXExchange(BaseExchange):
         now = self._get_current_time()
         next_hour = ((now.hour // 8) + 1) * 8
         return now.replace(hour=next_hour % 24, minute=0, second=0, microsecond=0)
+    
+    async def get_klines_futures(self, symbol: str, interval: str = '1h', start_time: int = None, end_time: int = None) -> list:
+        """Fetch kline/candlestick data for futures - 1 MONTH of data
+        
+        Args:
+            symbol: Trading symbol (e.g., 'BTC-USDT-SWAP' or 'BTCUSDT')
+            interval: Kline interval (1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 1w, 1M)
+            start_time: Start timestamp in milliseconds (optional, defaults to 30 days ago)
+            end_time: End timestamp in milliseconds (optional, defaults to now)
+        
+        Returns:
+            List of klines: [{time, open, high, low, close, volume}, ...]
+        """
+        from .klines_mixin import get_one_month_timestamps, get_exchange_interval
+        
+        if start_time is None or end_time is None:
+            start_time, end_time = get_one_month_timestamps()
+        
+        # Normalize symbol to OKX format
+        if not symbol.endswith('-SWAP'):
+            # Convert BTCUSDT to BTC-USDT-SWAP
+            if symbol.endswith('USDT'):
+                base = symbol[:-4]
+                symbol = f"{base}-USDT-SWAP"
+        
+        # Convert interval to OKX format (1m, 1H, 1D, etc.)
+        okx_interval = get_exchange_interval('okx', interval)
+        
+        # Use history-candles endpoint for historical data
+        endpoint = "/api/v5/market/history-candles"
+        
+        all_klines = []
+        current_end = end_time
+        max_limit = 300  # OKX max limit is 300
+        
+        while current_end > start_time:
+            params = {
+                'instId': symbol,
+                'bar': okx_interval,
+                'after': str(current_end),  # Pagination: get data before this timestamp
+                'limit': str(max_limit)
+            }
+            
+            response = await self._make_request("GET", f"{self.base_url}{endpoint}", params=params)
+            
+            if 'data' not in response or not isinstance(response['data'], list) or len(response['data']) == 0:
+                break
+            
+            batch_klines = []
+            for kline in response['data']:
+                try:
+                    kline_time = int(kline[0])
+                    if kline_time >= start_time:
+                        batch_klines.append({
+                            'time': kline_time / 1000,  # Convert to seconds
+                            'open': float(kline[1]),
+                            'high': float(kline[2]),
+                            'low': float(kline[3]),
+                            'close': float(kline[4]),
+                            'volume': float(kline[5])
+                        })
+                except Exception as e:
+                    logger.debug(f"OKX: Error processing kline {kline}: {str(e)}")
+                    continue
+            
+            all_klines = batch_klines + all_klines  # Prepend since we're going backwards
+            
+            if len(response['data']) < max_limit:
+                break
+            # Get the earliest timestamp from this batch
+            earliest_time = int(response['data'][-1][0])
+            current_end = earliest_time
+        
+        # Sort by time ascending
+        all_klines.sort(key=lambda x: x['time'])
+        logger.info(f"OKX Futures: Fetched {len(all_klines)} klines for {symbol}")
+        return all_klines
+    
+    async def get_klines_spot(self, symbol: str, interval: str = '1h', start_time: int = None, end_time: int = None) -> list:
+        """Fetch kline/candlestick data for spot - 1 MONTH of data
+        
+        Args:
+            symbol: Trading symbol (e.g., 'BTC-USDT' or 'BTCUSDT')
+            interval: Kline interval (1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 1w, 1M)
+            start_time: Start timestamp in milliseconds (optional, defaults to 30 days ago)
+            end_time: End timestamp in milliseconds (optional, defaults to now)
+        
+        Returns:
+            List of klines: [{time, open, high, low, close, volume}, ...]
+        """
+        from .klines_mixin import get_one_month_timestamps, get_exchange_interval
+        
+        if start_time is None or end_time is None:
+            start_time, end_time = get_one_month_timestamps()
+        
+        # Normalize symbol to OKX spot format (without -SWAP)
+        if symbol.endswith('-SWAP'):
+            symbol = symbol.replace('-SWAP', '')
+        elif not '-' in symbol:
+            # Convert BTCUSDT to BTC-USDT
+            if symbol.endswith('USDT'):
+                base = symbol[:-4]
+                symbol = f"{base}-USDT"
+        
+        # Convert interval to OKX format
+        okx_interval = get_exchange_interval('okx', interval)
+        
+        # Use history-candles endpoint for historical data
+        endpoint = "/api/v5/market/history-candles"
+        
+        all_klines = []
+        current_end = end_time
+        max_limit = 300
+        
+        while current_end > start_time:
+            params = {
+                'instId': symbol,
+                'bar': okx_interval,
+                'after': str(current_end),
+                'limit': str(max_limit)
+            }
+            
+            response = await self._make_request("GET", f"{self.base_url}{endpoint}", params=params)
+            
+            if 'data' not in response or not isinstance(response['data'], list) or len(response['data']) == 0:
+                break
+            
+            batch_klines = []
+            for kline in response['data']:
+                try:
+                    kline_time = int(kline[0])
+                    if kline_time >= start_time:
+                        batch_klines.append({
+                            'time': kline_time / 1000,  # Convert to seconds
+                            'open': float(kline[1]),
+                            'high': float(kline[2]),
+                            'low': float(kline[3]),
+                            'close': float(kline[4]),
+                            'volume': float(kline[5])
+                        })
+                except Exception as e:
+                    logger.debug(f"OKX: Error processing kline {kline}: {str(e)}")
+                    continue
+            
+            all_klines = batch_klines + all_klines
+            
+            if len(response['data']) < max_limit:
+                break
+            earliest_time = int(response['data'][-1][0])
+            current_end = earliest_time
+        
+        all_klines.sort(key=lambda x: x['time'])
+        logger.info(f"OKX Spot: Fetched {len(all_klines)} klines for {symbol}")
+        return all_klines

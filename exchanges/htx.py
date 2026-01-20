@@ -208,3 +208,196 @@ class HTXExchange(BaseExchange):
         
         logger.info(f"HTX: Successfully fetched {len(result)} spot prices")
         return result
+    
+    async def get_klines_futures(self, symbol: str, interval: str = '1h', start_time: int = None, end_time: int = None) -> list:
+        """Fetch kline/candlestick data for futures - 7 days of data
+        
+        Note: HTX futures API has limited time range for from/to queries.
+        We use 'size' parameter and paginate backwards using timestamps.
+        
+        Args:
+            symbol: Trading symbol (e.g., 'BTC-USDT')
+            interval: Kline interval (1m, 5m, 15m, 30m, 1h, 4h, 1d, 1w, 1M)
+            start_time: Start timestamp in SECONDS (optional, defaults to 7 days ago)
+            end_time: End timestamp in SECONDS (optional, defaults to now)
+        
+        Returns:
+            List of klines: [{time, open, high, low, close, volume}, ...]
+        """
+        from .klines_mixin import get_one_month_timestamps_seconds, get_exchange_interval, INTERVAL_MINUTES
+        
+        if start_time is None or end_time is None:
+            start_time, end_time = get_one_month_timestamps_seconds()
+        
+        # Ensure symbol has dash format for futures
+        if '-' not in symbol:
+            # Convert BTCUSDT to BTC-USDT
+            if symbol.endswith('USDT'):
+                base = symbol[:-4]
+                symbol = f"{base}-USDT"
+        
+        # Convert interval to HTX format
+        htx_interval = get_exchange_interval('htx_futures', interval)
+        
+        endpoint = "/linear-swap-ex/market/history/kline"
+        
+        all_klines = []
+        max_size = 2000
+        
+        # Calculate interval in seconds
+        interval_minutes = INTERVAL_MINUTES.get(interval, 60)
+        interval_seconds = interval_minutes * 60
+        
+        # Start by getting most recent data, then paginate backwards
+        current_to = end_time
+        
+        while current_to > start_time:
+            # HTX: use 'to' and 'size' to get data ending at current_to
+            # Unfortunately HTX doesn't support 'to' alone, so we use a short from/to range
+            # Use a range of ~1 day which is within HTX's limits
+            range_seconds = min(1440 * interval_seconds, current_to - start_time)  # Max ~1 day of candles
+            current_from = max(start_time, current_to - range_seconds)
+            
+            params = {
+                'contract_code': symbol,
+                'period': htx_interval,
+                'from': current_from,
+                'to': current_to
+            }
+            
+            response = await self._make_htx_request(endpoint, params=params)
+            
+            if not isinstance(response, dict) or response.get('status') != 'ok' or 'data' not in response:
+                # If from/to fails, try using size parameter alone
+                params = {
+                    'contract_code': symbol,
+                    'period': htx_interval,
+                    'size': max_size
+                }
+                response = await self._make_htx_request(endpoint, params=params)
+                if not isinstance(response, dict) or response.get('status') != 'ok' or 'data' not in response:
+                    break
+            
+            data = response['data']
+            if len(data) == 0:
+                break
+            
+            for kline in data:
+                try:
+                    kline_time = float(kline['id'])
+                    if start_time <= kline_time <= end_time:
+                        all_klines.append({
+                            'time': kline_time,  # Already in seconds
+                            'open': float(kline['open']),
+                            'high': float(kline['high']),
+                            'low': float(kline['low']),
+                            'close': float(kline['close']),
+                            'volume': float(kline['amount'])
+                        })
+                except Exception as e:
+                    logger.debug(f"HTX: Error processing kline {kline}: {str(e)}")
+                    continue
+            
+            # Move backwards
+            earliest_time = min(float(k['id']) for k in data)
+            if earliest_time <= start_time:
+                break
+            current_to = int(earliest_time) - 1
+        
+        # Sort by time ascending and remove duplicates
+        all_klines.sort(key=lambda x: x['time'])
+        seen = set()
+        unique_klines = []
+        for k in all_klines:
+            if k['time'] not in seen:
+                seen.add(k['time'])
+                unique_klines.append(k)
+        
+        logger.info(f"HTX Futures: Fetched {len(unique_klines)} klines for {symbol}")
+        return unique_klines
+        
+        # Sort by time ascending and remove duplicates
+        all_klines.sort(key=lambda x: x['time'])
+        seen = set()
+        unique_klines = []
+        for k in all_klines:
+            if k['time'] not in seen:
+                seen.add(k['time'])
+                unique_klines.append(k)
+        
+        logger.info(f"HTX Futures: Fetched {len(unique_klines)} klines for {symbol}")
+        return unique_klines
+    
+    async def get_klines_spot(self, symbol: str, interval: str = '1h', start_time: int = None, end_time: int = None) -> list:
+        """Fetch kline/candlestick data for spot - 7 days of data
+        
+        Note: HTX spot API only supports 'size' parameter (max 2000), not time range.
+        For 1m data over 7 days (10080 candles), we need multiple requests.
+        
+        Args:
+            symbol: Trading symbol (e.g., 'btcusdt')
+            interval: Kline interval (1m, 5m, 15m, 30m, 1h, 4h, 1d, 1w, 1M)
+            start_time: Start timestamp in SECONDS (optional, defaults to 7 days ago)
+            end_time: End timestamp in SECONDS (optional, defaults to now)
+        
+        Returns:
+            List of klines: [{time, open, high, low, close, volume}, ...]
+        """
+        from .klines_mixin import get_one_month_timestamps_seconds, get_exchange_interval, INTERVAL_MINUTES
+        
+        if start_time is None or end_time is None:
+            start_time, end_time = get_one_month_timestamps_seconds()
+        
+        # Convert interval to HTX spot format
+        htx_interval = get_exchange_interval('htx_spot', interval)
+        
+        url = "https://api.huobi.pro/market/history/kline"
+        # HTX spot uses 'size' parameter (max 2000) - returns most recent candles
+        params = {
+            'symbol': symbol.lower(),
+            'period': htx_interval,
+            'size': 2000
+        }
+        
+        await self._init_session()
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+        }
+        
+        all_klines = []
+        try:
+            async with self.session.request("GET", url, params=params, headers=headers) as resp:
+                if resp.status == 200:
+                    text = await resp.text()
+                    import json
+                    response = json.loads(text)
+                    
+                    if isinstance(response, dict) and response.get('status') == 'ok' and 'data' in response:
+                        for kline in response['data']:
+                            try:
+                                kline_time = float(kline['id'])
+                                # Filter by time range
+                                if start_time <= kline_time <= end_time:
+                                    all_klines.append({
+                                        'time': kline_time,  # Already in seconds
+                                        'open': float(kline['open']),
+                                        'high': float(kline['high']),
+                                        'low': float(kline['low']),
+                                        'close': float(kline['close']),
+                                        'volume': float(kline['amount'])
+                                    })
+                            except Exception as e:
+                                logger.debug(f"HTX: Error processing kline {kline}: {str(e)}")
+                                continue
+                else:
+                    logger.warning(f"HTX: HTTP {resp.status} for spot klines")
+        except Exception as e:
+            logger.debug(f"HTX: Error fetching spot klines: {str(e)}")
+        
+        # Sort by time ascending
+        all_klines.sort(key=lambda x: x['time'])
+        logger.info(f"HTX Spot: Fetched {len(all_klines)} klines for {symbol}")
+        return all_klines

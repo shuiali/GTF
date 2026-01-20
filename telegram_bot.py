@@ -77,7 +77,7 @@ class TelegramBot:
             'Gate.io': 'https://www.gate.io/trade/{symbol}',
             'KuCoin': 'https://www.kucoin.com/futures/trade/{symbol}M',
             'BitGet': 'https://www.bitget.com/futures/usdt/{symbol}',
-            'LBank': 'https://lbank.com/trade/{symbol}'  # NEW EXCHANGE URL
+            # 'LBank': 'https://lbank.com/futures/{symbol}'  # NEW EXCHANGE URL - DISABLED
         }
         
         # Spot URLs for margin trading
@@ -153,9 +153,9 @@ class TelegramBot:
         welcome_msg = f"""
 🤖 **Funding Arbitrage Bot - All Exchanges Active!**
 
-📊 Track funding rate differences across 9 major exchanges:
+📊 Track funding rate differences across 8 major exchanges:
 • Binance • OKX • Bybit • MEXC
-• HTX • Gate.io • KuCoin • BitGet • LBank
+• HTX • Gate.io • KuCoin • BitGet
 
 **Current Mode:** `{current_mode}`
 
@@ -197,8 +197,8 @@ Find coins with significant price differences
   - SHORT on margin (no funding cost)
   - Min funding: 0.5%
 
-**All 9 Exchanges:**
-Binance, OKX, Bybit, MEXC, HTX, Gate.io, KuCoin, BitGet, LBank
+**All 8 Exchanges:**
+Binance, OKX, Bybit, MEXC, HTX, Gate.io, KuCoin, BitGet
 """
         await update.message.reply_text(help_msg, parse_mode='Markdown')
 

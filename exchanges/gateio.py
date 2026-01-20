@@ -203,3 +203,187 @@ class GateioExchange(BaseExchange):
         
         logger.info(f"Gate.io: Successfully fetched {len(result)} spot prices")
         return result
+    
+    async def get_klines_futures(self, symbol: str, interval: str = '1h', start_time: int = None, end_time: int = None) -> list:
+        """Fetch kline/candlestick data for futures - 7 days of data
+        
+        Args:
+            symbol: Trading symbol in Gate.io format (e.g., 'BTC_USDT' or 'BTCUSDT')
+            interval: Kline interval (1m, 5m, 15m, 30m, 1h, 4h, 8h, 1d, 7d, 30d)
+            start_time: Start timestamp in SECONDS (optional, defaults to 7 days ago)
+            end_time: End timestamp in SECONDS (optional, defaults to now)
+        
+        Returns:
+            List of klines: [{time, open, high, low, close, volume}, ...]
+        """
+        from .klines_mixin import get_one_month_timestamps_seconds, get_exchange_interval, INTERVAL_MINUTES
+        
+        if start_time is None or end_time is None:
+            start_time, end_time = get_one_month_timestamps_seconds()
+        
+        # Ensure symbol has underscore format
+        if '_' not in symbol:
+            if symbol.endswith('USDT'):
+                base = symbol[:-4]
+                symbol = f"{base}_USDT"
+        
+        # Convert interval to Gate.io format
+        gateio_interval = get_exchange_interval('gateio', interval)
+        
+        endpoint = "/api/v4/futures/usdt/candlesticks"
+        
+        all_klines = []
+        current_end = end_time
+        max_limit = 2000
+        
+        # Calculate interval in seconds for pagination
+        interval_minutes = INTERVAL_MINUTES.get(interval, 60)
+        interval_seconds = interval_minutes * 60
+        
+        # Work backwards to get all data
+        while current_end > start_time:
+            # Calculate how far back to request (max 2000 candles)
+            chunk_start = max(start_time, current_end - (max_limit * interval_seconds))
+            
+            params = {
+                'contract': symbol,
+                'interval': gateio_interval,
+                'from': chunk_start,
+                'to': current_end
+            }
+            
+            response = await self._make_gateio_request(endpoint, params=params)
+            
+            if not isinstance(response, list) or len(response) == 0:
+                break
+            
+            batch_klines = []
+            for kline in response:
+                try:
+                    # Gate.io returns: {t, v, c, h, l, o, sum}
+                    batch_klines.append({
+                        'time': float(kline['t']),  # Already in seconds
+                        'open': float(kline['o']),
+                        'high': float(kline['h']),
+                        'low': float(kline['l']),
+                        'close': float(kline['c']),
+                        'volume': float(kline['v'])
+                    })
+                except Exception as e:
+                    logger.debug(f"Gate.io: Error processing kline {kline}: {str(e)}")
+                    continue
+            
+            # Prepend to maintain order (oldest first)
+            all_klines = batch_klines + all_klines
+            
+            # If we got less than max, we have all the data
+            if len(response) < max_limit:
+                break
+            
+            # Move backwards - set end to before the earliest kline we received
+            earliest_time = min(float(k['t']) for k in response)
+            current_end = int(earliest_time) - 1
+        
+        # Sort by time ascending and remove duplicates
+        all_klines.sort(key=lambda x: x['time'])
+        seen = set()
+        unique_klines = []
+        for k in all_klines:
+            if k['time'] not in seen:
+                seen.add(k['time'])
+                unique_klines.append(k)
+        
+        logger.info(f"Gate.io Futures: Fetched {len(unique_klines)} klines for {symbol}")
+        return unique_klines
+    
+    async def get_klines_spot(self, symbol: str, interval: str = '1h', start_time: int = None, end_time: int = None) -> list:
+        """Fetch kline/candlestick data for spot - 7 days of data
+        
+        Note: Gate.io spot API has special rule - 'limit' conflicts with 'from/to'.
+        We must use 'limit' and paginate by using 'to' as the end marker.
+        
+        Args:
+            symbol: Trading symbol in Gate.io format (e.g., 'BTC_USDT' or 'BTCUSDT')
+            interval: Kline interval (1m, 5m, 15m, 30m, 1h, 4h, 8h, 1d, 7d, 30d)
+            start_time: Start timestamp in SECONDS (optional, defaults to 7 days ago)
+            end_time: End timestamp in SECONDS (optional, defaults to now)
+        
+        Returns:
+            List of klines: [{time, open, high, low, close, volume}, ...]
+        """
+        from .klines_mixin import get_one_month_timestamps_seconds, get_exchange_interval, INTERVAL_MINUTES
+        
+        if start_time is None or end_time is None:
+            start_time, end_time = get_one_month_timestamps_seconds()
+        
+        # Ensure symbol has underscore format
+        if '_' not in symbol:
+            if symbol.endswith('USDT'):
+                base = symbol[:-4]
+                symbol = f"{base}_USDT"
+        
+        # Convert interval to Gate.io format
+        gateio_interval = get_exchange_interval('gateio', interval)
+        
+        endpoint = "/api/v4/spot/candlesticks"
+        
+        all_klines = []
+        current_end = end_time
+        max_limit = 1000  # Gate.io spot max is 1000
+        
+        # Work backwards using 'to' and 'limit' (NOT 'from')
+        while current_end > start_time:
+            # Gate.io spot: "limit conflicts with from and to"
+            # So we use 'to' and 'limit' only
+            params = {
+                'currency_pair': symbol,
+                'interval': gateio_interval,
+                'to': current_end,
+                'limit': max_limit
+            }
+            
+            response = await self._make_gateio_request(endpoint, params=params)
+            
+            if not isinstance(response, list) or len(response) == 0:
+                break
+            
+            batch_klines = []
+            for kline in response:
+                try:
+                    kline_time = float(kline[0])
+                    # Only include klines within our time range
+                    if kline_time >= start_time:
+                        batch_klines.append({
+                            'time': kline_time,  # Already in seconds
+                            'open': float(kline[5]),
+                            'high': float(kline[3]),
+                            'low': float(kline[4]),
+                            'close': float(kline[2]),
+                            'volume': float(kline[1])
+                        })
+                except Exception as e:
+                    logger.debug(f"Gate.io: Error processing kline {kline}: {str(e)}")
+                    continue
+            
+            all_klines.extend(batch_klines)
+            
+            if len(response) < max_limit:
+                break
+            
+            # Move backwards - use the earliest timestamp from response minus 1 second
+            earliest_time = min(float(k[0]) for k in response)
+            if earliest_time <= start_time:
+                break
+            current_end = int(earliest_time) - 1
+        
+        # Sort and remove duplicates
+        all_klines.sort(key=lambda x: x['time'])
+        seen = set()
+        unique_klines = []
+        for k in all_klines:
+            if k['time'] not in seen:
+                seen.add(k['time'])
+                unique_klines.append(k)
+        
+        logger.info(f"Gate.io Spot: Fetched {len(unique_klines)} klines for {symbol}")
+        return unique_klines

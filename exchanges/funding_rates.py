@@ -11,7 +11,7 @@ from .htx import HTXExchange
 from .gateio import GateioExchange
 from .kucoin import KucoinExchange
 from .bitget import BitgetExchange
-from .lbank import LBankExchange  # NEW IMPORT
+# from .lbank import LBankExchange  # NEW IMPORT - DISABLED
 from utils.config_loader import ConfigLoader
 
 logger = logging.getLogger(__name__)
@@ -20,7 +20,7 @@ class FundingRateManager:
     def __init__(self):
         self.config = ConfigLoader()
         
-        # All 9 exchanges enabled (added LBank)
+        # All 8 exchanges enabled (LBank disabled)
         self.exchanges = {
             'Binance': BinanceExchange(),
             'MEXC': MEXCExchange(),
@@ -30,7 +30,7 @@ class FundingRateManager:
             'Gate.io': GateioExchange(),
             'KuCoin': KucoinExchange(),
             'BitGet': BitgetExchange(),
-            'LBank': LBankExchange()  # NEW EXCHANGE
+            # 'LBank': LBankExchange()  # NEW EXCHANGE - DISABLED
         }
         
         # Exchanges that support margin trading (have margin API implemented)

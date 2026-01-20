@@ -146,3 +146,7 @@ class BaseExchange(ABC):
         """Fetch spot prices for tokens. Override in exchanges that support spot.
         Returns dict of symbols (e.g., 'BTCUSDT') to price"""
         return {}
+    
+    async def close(self):
+        """Close the exchange session properly"""
+        await self._close_session()

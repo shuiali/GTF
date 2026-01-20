@@ -151,3 +151,125 @@ class BinanceExchange(BaseExchange):
         
         logger.info(f"Binance: Successfully fetched {len(result)} spot prices")
         return result
+    
+    async def get_klines_futures(self, symbol: str, interval: str = '1h', start_time: int = None, end_time: int = None) -> list:
+        """Fetch kline/candlestick data for futures - 1 MONTH of data
+        
+        Args:
+            symbol: Trading symbol (e.g., 'BTCUSDT')
+            interval: Kline interval (1m, 5m, 15m, 30m, 1h, 4h, 1d, etc.)
+            start_time: Start timestamp in milliseconds (optional, defaults to 30 days ago)
+            end_time: End timestamp in milliseconds (optional, defaults to now)
+        
+        Returns:
+            List of klines: [{time, open, high, low, close, volume}, ...]
+        """
+        from .klines_mixin import get_one_month_timestamps
+        
+        if start_time is None or end_time is None:
+            start_time, end_time = get_one_month_timestamps()
+        
+        endpoint = "/fapi/v1/klines"
+        url = f"{self.base_url}{endpoint}"
+        
+        all_klines = []
+        current_start = start_time
+        max_limit = 1500
+        
+        while current_start < end_time:
+            params = {
+                'symbol': symbol,
+                'interval': interval,
+                'startTime': current_start,
+                'endTime': end_time,
+                'limit': max_limit
+            }
+            
+            response = await self._make_request("GET", url, params=params)
+            
+            if not isinstance(response, list) or len(response) == 0:
+                break
+            
+            for kline in response:
+                try:
+                    all_klines.append({
+                        'time': int(kline[0]) / 1000,  # Convert to seconds
+                        'open': float(kline[1]),
+                        'high': float(kline[2]),
+                        'low': float(kline[3]),
+                        'close': float(kline[4]),
+                        'volume': float(kline[5])
+                    })
+                except Exception as e:
+                    logger.debug(f"Binance: Error processing kline {kline}: {str(e)}")
+                    continue
+            
+            # Move to next batch
+            if len(response) < max_limit:
+                break
+            last_time = int(response[-1][0])
+            current_start = last_time + 1
+        
+        logger.info(f"Binance Futures: Fetched {len(all_klines)} klines for {symbol}")
+        return all_klines
+    
+    async def get_klines_spot(self, symbol: str, interval: str = '1h', start_time: int = None, end_time: int = None) -> list:
+        """Fetch kline/candlestick data for spot - 1 MONTH of data
+        
+        Args:
+            symbol: Trading symbol (e.g., 'BTCUSDT')
+            interval: Kline interval (1m, 5m, 15m, 30m, 1h, 4h, 1d, etc.)
+            start_time: Start timestamp in milliseconds (optional, defaults to 30 days ago)
+            end_time: End timestamp in milliseconds (optional, defaults to now)
+        
+        Returns:
+            List of klines: [{time, open, high, low, close, volume}, ...]
+        """
+        from .klines_mixin import get_one_month_timestamps
+        
+        if start_time is None or end_time is None:
+            start_time, end_time = get_one_month_timestamps()
+        
+        endpoint = "/api/v3/klines"
+        url = f"{self.spot_url}{endpoint}"
+        
+        all_klines = []
+        current_start = start_time
+        max_limit = 1000
+        
+        while current_start < end_time:
+            params = {
+                'symbol': symbol,
+                'interval': interval,
+                'startTime': current_start,
+                'endTime': end_time,
+                'limit': max_limit
+            }
+            
+            response = await self._make_request("GET", url, params=params)
+            
+            if not isinstance(response, list) or len(response) == 0:
+                break
+            
+            for kline in response:
+                try:
+                    all_klines.append({
+                        'time': int(kline[0]) / 1000,  # Convert to seconds
+                        'open': float(kline[1]),
+                        'high': float(kline[2]),
+                        'low': float(kline[3]),
+                        'close': float(kline[4]),
+                        'volume': float(kline[5])
+                    })
+                except Exception as e:
+                    logger.debug(f"Binance: Error processing kline {kline}: {str(e)}")
+                    continue
+            
+            # Move to next batch
+            if len(response) < max_limit:
+                break
+            last_time = int(response[-1][0])
+            current_start = last_time + 1
+        
+        logger.info(f"Binance Spot: Fetched {len(all_klines)} klines for {symbol}")
+        return all_klines

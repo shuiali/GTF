@@ -166,3 +166,141 @@ class BybitExchange(BaseExchange):
         
         logger.info(f"Bybit: Successfully fetched {len(result)} spot prices")
         return result
+    
+    async def get_klines_futures(self, symbol: str, interval: str = '1h', start_time: int = None, end_time: int = None) -> list:
+        """Fetch kline/candlestick data for futures - 1 MONTH of data
+        
+        Args:
+            symbol: Trading symbol (e.g., 'BTCUSDT')
+            interval: Kline interval (1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 1w, 1M)
+            start_time: Start timestamp in milliseconds (optional, defaults to 30 days ago)
+            end_time: End timestamp in milliseconds (optional, defaults to now)
+        
+        Returns:
+            List of klines: [{time, open, high, low, close, volume}, ...]
+        """
+        from .klines_mixin import get_one_month_timestamps, get_exchange_interval
+        
+        if start_time is None or end_time is None:
+            start_time, end_time = get_one_month_timestamps()
+        
+        # Convert interval to Bybit format (1, 3, 5, 15, 30, 60, 120, 240, 360, 720, D, W, M)
+        bybit_interval = get_exchange_interval('bybit', interval)
+        
+        endpoint = "/v5/market/kline"
+        
+        all_klines = []
+        current_end = end_time
+        max_limit = 1000
+        
+        while current_end > start_time:
+            params = {
+                'category': 'linear',
+                'symbol': symbol,
+                'interval': bybit_interval,
+                'start': start_time,
+                'end': current_end,
+                'limit': max_limit
+            }
+            
+            response = await self._make_request("GET", f"{self.base_url}{endpoint}", params=params)
+            
+            if 'result' not in response or 'list' not in response['result'] or len(response['result']['list']) == 0:
+                break
+            
+            batch_klines = []
+            for kline in response['result']['list']:
+                try:
+                    # Bybit returns: [startTime, openPrice, highPrice, lowPrice, closePrice, volume, turnover]
+                    batch_klines.append({
+                        'time': int(kline[0]) / 1000,  # Convert to seconds
+                        'open': float(kline[1]),
+                        'high': float(kline[2]),
+                        'low': float(kline[3]),
+                        'close': float(kline[4]),
+                        'volume': float(kline[5])
+                    })
+                except Exception as e:
+                    logger.debug(f"Bybit: Error processing kline {kline}: {str(e)}")
+                    continue
+            
+            # Bybit returns in descending order, so prepend
+            all_klines = batch_klines + all_klines
+            
+            if len(response['result']['list']) < max_limit:
+                break
+            # Get the earliest timestamp from this batch
+            earliest_time = int(response['result']['list'][-1][0])
+            current_end = earliest_time - 1
+        
+        # Sort by time ascending
+        all_klines.sort(key=lambda x: x['time'])
+        logger.info(f"Bybit Futures: Fetched {len(all_klines)} klines for {symbol}")
+        return all_klines
+    
+    async def get_klines_spot(self, symbol: str, interval: str = '1h', start_time: int = None, end_time: int = None) -> list:
+        """Fetch kline/candlestick data for spot - 1 MONTH of data
+        
+        Args:
+            symbol: Trading symbol (e.g., 'BTCUSDT')
+            interval: Kline interval (1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 1w, 1M)
+            start_time: Start timestamp in milliseconds (optional, defaults to 30 days ago)
+            end_time: End timestamp in milliseconds (optional, defaults to now)
+        
+        Returns:
+            List of klines: [{time, open, high, low, close, volume}, ...]
+        """
+        from .klines_mixin import get_one_month_timestamps, get_exchange_interval
+        
+        if start_time is None or end_time is None:
+            start_time, end_time = get_one_month_timestamps()
+        
+        # Convert interval to Bybit format
+        bybit_interval = get_exchange_interval('bybit', interval)
+        
+        endpoint = "/v5/market/kline"
+        
+        all_klines = []
+        current_end = end_time
+        max_limit = 1000
+        
+        while current_end > start_time:
+            params = {
+                'category': 'spot',
+                'symbol': symbol,
+                'interval': bybit_interval,
+                'start': start_time,
+                'end': current_end,
+                'limit': max_limit
+            }
+            
+            response = await self._make_request("GET", f"{self.base_url}{endpoint}", params=params)
+            
+            if 'result' not in response or 'list' not in response['result'] or len(response['result']['list']) == 0:
+                break
+            
+            batch_klines = []
+            for kline in response['result']['list']:
+                try:
+                    batch_klines.append({
+                        'time': int(kline[0]) / 1000,  # Convert to seconds
+                        'open': float(kline[1]),
+                        'high': float(kline[2]),
+                        'low': float(kline[3]),
+                        'close': float(kline[4]),
+                        'volume': float(kline[5])
+                    })
+                except Exception as e:
+                    logger.debug(f"Bybit: Error processing kline {kline}: {str(e)}")
+                    continue
+            
+            all_klines = batch_klines + all_klines
+            
+            if len(response['result']['list']) < max_limit:
+                break
+            earliest_time = int(response['result']['list'][-1][0])
+            current_end = earliest_time - 1
+        
+        all_klines.sort(key=lambda x: x['time'])
+        logger.info(f"Bybit Spot: Fetched {len(all_klines)} klines for {symbol}")
+        return all_klines

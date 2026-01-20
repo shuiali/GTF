@@ -209,3 +209,182 @@ class KucoinExchange(BaseExchange):
         
         logger.info(f"KuCoin: Successfully fetched {len(result)} spot prices")
         return result
+    
+    async def get_klines_futures(self, symbol: str, interval: str = '1h', start_time: int = None, end_time: int = None) -> list:
+        """Fetch kline/candlestick data for futures - 7 days of data
+        
+        Note: KuCoin Futures API returns max 200 klines per request (despite docs saying 500)
+        
+        Args:
+            symbol: Trading symbol in KuCoin format (e.g., 'XBTUSDTM' or 'BTCUSDT')
+            interval: Kline interval (1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h, 1d, 1w)
+            start_time: Start timestamp in milliseconds (optional, defaults to 7 days ago)
+            end_time: End timestamp in milliseconds (optional, defaults to now)
+        
+        Returns:
+            List of klines: [{time, open, high, low, close, volume}, ...]
+        """
+        from .klines_mixin import get_one_month_timestamps, get_exchange_interval, INTERVAL_MINUTES
+        
+        if start_time is None or end_time is None:
+            start_time, end_time = get_one_month_timestamps()
+        
+        # Normalize symbol to KuCoin format
+        if symbol == 'BTCUSDT':
+            symbol = 'XBTUSDTM'
+        elif not symbol.endswith('M'):
+            symbol = f"{symbol}M"
+        
+        # Convert interval to KuCoin futures format (minutes as integer)
+        kucoin_granularity = get_exchange_interval('kucoin_futures', interval)
+        
+        endpoint = "/api/v1/kline/query"
+        
+        all_klines = []
+        max_limit = 200  # KuCoin actually returns max 200 per request
+        
+        # Calculate interval in milliseconds for pagination
+        interval_minutes = INTERVAL_MINUTES.get(interval, 60)
+        interval_ms = interval_minutes * 60 * 1000
+        
+        # Work forwards from start_time to end_time
+        current_start = start_time
+        
+        while current_start < end_time:
+            # Calculate chunk end (max 200 candles)
+            chunk_end = min(end_time, current_start + (max_limit * interval_ms))
+            
+            params = {
+                'symbol': symbol,
+                'granularity': kucoin_granularity,
+                'from': current_start,
+                'to': chunk_end
+            }
+            
+            response = await self._make_request("GET", f"{self.base_url}{endpoint}", params=params)
+            
+            if 'data' not in response or not isinstance(response['data'], list) or len(response['data']) == 0:
+                break
+            
+            for kline in response['data']:
+                try:
+                    # KuCoin futures returns: [timestamp, open, high, low, close, volume, turnover]
+                    all_klines.append({
+                        'time': float(kline[0]) / 1000,  # Convert to seconds
+                        'open': float(kline[1]),
+                        'high': float(kline[2]),
+                        'low': float(kline[3]),
+                        'close': float(kline[4]),
+                        'volume': float(kline[5])
+                    })
+                except Exception as e:
+                    logger.debug(f"KuCoin: Error processing kline {kline}: {str(e)}")
+                    continue
+            
+            # Move forward based on last timestamp received
+            last_time = max(int(k[0]) for k in response['data'])
+            if last_time >= end_time:
+                break
+            current_start = last_time + interval_ms
+        
+        # Remove duplicates by timestamp
+        seen = set()
+        unique_klines = []
+        for kline in all_klines:
+            if kline['time'] not in seen:
+                seen.add(kline['time'])
+                unique_klines.append(kline)
+        
+        unique_klines.sort(key=lambda x: x['time'])
+        logger.info(f"KuCoin Futures: Fetched {len(unique_klines)} klines for {symbol}")
+        return unique_klines
+    
+    async def get_klines_spot(self, symbol: str, interval: str = '1h', start_time: int = None, end_time: int = None) -> list:
+        """Fetch kline/candlestick data for spot - 7 days of data
+        
+        Note: KuCoin spot returns data in DESCENDING order (newest first)
+        
+        Args:
+            symbol: Trading symbol (e.g., 'BTC-USDT')
+            interval: Kline interval (1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 1w)
+            start_time: Start timestamp in SECONDS (optional, defaults to 7 days ago)
+            end_time: End timestamp in SECONDS (optional, defaults to now)
+        
+        Returns:
+            List of klines: [{time, open, high, low, close, volume}, ...]
+        """
+        from .klines_mixin import get_one_month_timestamps_seconds, get_exchange_interval, INTERVAL_MINUTES
+        
+        if start_time is None or end_time is None:
+            start_time, end_time = get_one_month_timestamps_seconds()
+        
+        # Ensure symbol has dash format
+        if '-' not in symbol:
+            # Convert BTCUSDT to BTC-USDT
+            if symbol.endswith('USDT'):
+                base = symbol[:-4]
+                symbol = f"{base}-USDT"
+        
+        # Convert interval to KuCoin spot format (1min, 1hour, 1day, etc.)
+        kucoin_interval = get_exchange_interval('kucoin_spot', interval)
+        
+        spot_url = "https://api.kucoin.com"
+        endpoint = "/api/v1/market/candles"
+        
+        all_klines = []
+        max_limit = 1500
+        
+        # Calculate interval in seconds for pagination
+        interval_minutes = INTERVAL_MINUTES.get(interval, 60)
+        interval_seconds = interval_minutes * 60
+        
+        # KuCoin spot returns data in descending order (newest first)
+        # So we need to paginate backwards from end_time
+        current_end = end_time
+        
+        while current_end > start_time:
+            params = {
+                'symbol': symbol,
+                'type': kucoin_interval,
+                'startAt': start_time,
+                'endAt': current_end
+            }
+            
+            response = await self._make_request("GET", f"{spot_url}{endpoint}", params=params)
+            
+            if 'data' not in response or not isinstance(response['data'], list) or len(response['data']) == 0:
+                break
+            
+            for kline in response['data']:
+                try:
+                    # KuCoin spot returns: [timestamp, open, close, high, low, volume, turnover]
+                    all_klines.append({
+                        'time': float(kline[0]),  # Already in seconds
+                        'open': float(kline[1]),
+                        'high': float(kline[3]),
+                        'low': float(kline[4]),
+                        'close': float(kline[2]),
+                        'volume': float(kline[5])
+                    })
+                except Exception as e:
+                    logger.debug(f"KuCoin: Error processing kline {kline}: {str(e)}")
+                    continue
+            
+            if len(response['data']) < max_limit:
+                break
+            
+            # KuCoin returns in descending order, so the last item is the oldest
+            earliest_time = int(response['data'][-1][0])
+            current_end = earliest_time - 1
+        
+        # Remove duplicates and sort by time ascending
+        seen = set()
+        unique_klines = []
+        for kline in all_klines:
+            if kline['time'] not in seen:
+                seen.add(kline['time'])
+                unique_klines.append(kline)
+        
+        unique_klines.sort(key=lambda x: x['time'])
+        logger.info(f"KuCoin Spot: Fetched {len(unique_klines)} klines for {symbol}")
+        return unique_klines
