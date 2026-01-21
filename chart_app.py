@@ -993,8 +993,9 @@ HTML_TEMPLATE = """
             const exchange1 = document.getElementById('exchange1').value;
             const exchange2 = document.getElementById('exchange2').value;
             
-            if (exchange1 === exchange2) {
-                throw new Error('Please select two different exchanges');
+            // Allow same exchange ONLY if markets are different (futures vs spot)
+            if (exchange1 === exchange2 && selectedMarket1 === selectedMarket2) {
+                throw new Error('Same exchange requires different markets (Futures vs Spot)');
             }
             
             // Update labels

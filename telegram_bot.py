@@ -253,7 +253,7 @@ Binance, OKX, Bybit, MEXC, HTX, Gate.io, KuCoin, BitGet
         )
     
     async def _handle_margin_funding(self, update: Update) -> None:
-        """Handle futures-margin funding mode"""
+        """Handle futures-margin funding mode (similar to futures-futures display)"""
         await update.message.reply_text("🔄 Fetching margin arbitrage data (futures + margin)...")
         
         opportunities = await self.funding_manager.get_margin_opportunities()
@@ -273,22 +273,29 @@ Binance, OKX, Bybit, MEXC, HTX, Gate.io, KuCoin, BitGet
         keyboard = []
         for i, opp in enumerate(opportunities[:20], 1):  # Show top 20
             funding_rate = opp['funding_rate']
-            button_text = f"{opp['symbol']} ({funding_rate:.4f}%)"
+            num_futures = len(opp.get('all_futures_exchanges', {}))
+            num_margin = len(opp.get('all_margin_exchanges', {}))
+            # Show exchanges count like in futures-futures mode
+            button_text = f"{opp['symbol']} ({funding_rate:.4f}%) [{num_futures}F/{num_margin}M]"
             callback_data = f"margin_{i-1}"  # Use index for callback
             keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         message = "💰 **Futures-Margin Arbitrage (Negative Funding):**\n\n"
-        message += "Strategy: LONG futures + SHORT margin\n"
+        message += "_Best margin = closest spread to 0%_\n"
         message += "Click any button for details:\n\n"
         
-        # Show summary of top 5
+        # Show summary of top 5 with more details
         for i, opp in enumerate(opportunities[:5], 1):
             funding = opp['funding_rate']
             futures_ex = opp['futures_exchange']
             margin_ex = opp['margin_exchange']
-            message += f"{i}. **{opp['symbol']}**: {funding:.4f}% ({futures_ex}→{margin_ex})\n"
+            spread = opp['price_spread']
+            num_futures = len(opp.get('all_futures_exchanges', {}))
+            num_margin = len(opp.get('all_margin_exchanges', {}))
+            message += f"{i}. **{opp['symbol']}**: {funding:.4f}%\n"
+            message += f"   └ {futures_ex}→{margin_ex} | Spread: {spread:+.2f}% | [{num_futures}F/{num_margin}M]\n"
         
         await update.message.reply_text(
             message, 
@@ -444,7 +451,6 @@ Current mode: `{current_mode}`
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 
                 message = "💰 **Futures-Margin Arbitrage (Negative Funding):**\n\n"
-                message += "Strategy: LONG futures + SHORT margin\n"
                 message += "Click any button for details:\n\n"
                 
                 for i, opp in enumerate(self.cached_margin_opportunities[:5], 1):
@@ -718,7 +724,7 @@ Current mode: `{current_mode}`
         return msg
 
     def _format_detailed_margin_opportunity(self, opp: dict) -> str:
-        """Format detailed margin arbitrage opportunity message"""
+        """Format detailed margin arbitrage opportunity message (similar to futures-futures format)"""
         symbol = opp['symbol']
         base_token = opp['base_token']
         
@@ -731,10 +737,8 @@ Current mode: `{current_mode}`
         # Build message
         msg = f"**Монета: {display_symbol}**\n\n"
         
-        # Strategy section
-        msg += "**💹 FUTURES-MARGIN ARBITRAGE**\n"
-        msg += "Strategy: LONG futures + SHORT margin\n\n"
-        
+        # Top recommendation section (best combo)
+        msg += "**TOP MARGIN ARBITRAGE**\n"
         futures_ex = opp['futures_exchange']
         margin_ex = opp['margin_exchange']
         
@@ -742,32 +746,71 @@ Current mode: `{current_mode}`
         spot_symbol_formatted = f"{base_token}-USDT" if margin_ex != 'Gate.io' else f"{base_token}_USDT"
         margin_url = self.spot_urls.get(margin_ex, '#').format(symbol=spot_symbol_formatted)
         
-        msg += f"📈 LONG [{futures_ex.lower()}]({futures_url}) (futures)\n"
-        msg += f"📉 SHORT [{margin_ex.lower()}]({margin_url}) (margin)\n\n"
+        msg += f"LONG [{futures_ex.lower()}]({futures_url}) - SHORT [{margin_ex.lower()}]({margin_url})\n\n"
         
         # Key metrics
-        msg += "**Показатели:**\n"
-        msg += f"• Funding Rate: **{opp['funding_rate']:.4f}%** (negative = you receive)\n"
-        msg += f"• Profit per period: **{opp['funding_profit']:.4f}%**\n"
-        msg += f"• Price Spread: {opp['price_spread']:+.4f}%\n\n"
+        msg += f"**Funding Rate:** {opp['funding_rate']:.4f}% (получаем)\n"
+        msg += f"**Спред цен:** {opp['price_spread']:+.4f}%\n\n"
         
-        # Prices
-        msg += "**Цены:**\n"
-        msg += f"• Futures ({futures_ex}): ${opp['futures_price']:.4f}\n"
-        msg += f"• Spot ({margin_ex}): ${opp['spot_price']:.4f}\n\n"
+        # All futures exchanges table
+        all_futures = opp.get('all_futures_exchanges', {})
+        if all_futures:
+            msg += "**Futures биржи:**\n"
+            msg += "```\n"
+            msg += "Биржа       Ставка     Цена    Время\n"
+            msg += "────────────────────────────────────\n"
+            
+            # Sort by funding rate (most negative first - best to LONG)
+            sorted_futures = sorted(
+                all_futures.items(),
+                key=lambda x: x[1]['funding_rate']
+            )
+            
+            for ex_name, data in sorted_futures:
+                ex_display = ex_name.lower()[:9].ljust(9)
+                rate_str = f"{data['funding_rate']*100:+.3f}".rjust(8)
+                price_str = f"{data['price']:.4f}".rjust(9)
+                time_remaining = self._calculate_time_remaining(data['next_funding'])
+                time_str = time_remaining.rjust(6)
+                
+                # Mark the best (most negative) with indicator
+                indicator = "◀" if ex_name == futures_ex else " "
+                msg += f"{ex_display} {rate_str} {price_str}  {time_str}{indicator}\n"
+            
+            msg += "```\n"
         
-        # Next funding
+        # All margin exchanges table
+        all_margin = opp.get('all_margin_exchanges', {})
+        if all_margin:
+            msg += "**Margin:**\n"
+            msg += "```\n"
+            msg += "Биржа       Цена      Спред\n"
+            msg += "─────────────────────────────\n"
+            
+            # Get best futures price for spread calculation
+            best_futures_price = opp['futures_price']
+            
+            # Sort by spread (closest to 0 first - best)
+            sorted_margin = sorted(
+                all_margin.items(),
+                key=lambda x: abs(x[1].get('spread', float('inf')))
+            )
+            
+            for ex_name, data in sorted_margin:
+                ex_display = ex_name.lower()[:9].ljust(9)
+                price_str = f"{data['price']:.4f}".rjust(9)
+                spread = data.get('spread', ((data['price'] - best_futures_price) / best_futures_price) * 100)
+                spread_str = f"{spread:+.2f}%".rjust(7)
+                
+                # Mark the best (closest to 0%) with indicator
+                indicator = "◀" if ex_name == margin_ex else " "
+                msg += f"{ex_display} {price_str}  {spread_str}{indicator}\n"
+            
+            msg += "```\n"
+        
+        # Next funding time
         time_remaining = self._calculate_time_remaining(opp['next_funding'])
         msg += f"⏰ Next funding: **{time_remaining}**\n\n"
-        
-        # Explanation
-        msg += "**Как работает:**\n"
-        msg += "```\n"
-        msg += "1. LONG futures (получаем funding)\n"
-        msg += "2. SHORT margin (без funding)\n"
-        msg += "3. Позиции хеджированы\n"
-        msg += "4. Profit = |funding rate|\n"
-        msg += "```"
         
         return msg
 

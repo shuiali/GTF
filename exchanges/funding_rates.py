@@ -379,18 +379,16 @@ class FundingRateManager:
 
     async def get_margin_opportunities(self) -> List[Dict]:
         """
-        Get futures-margin arbitrage opportunities.
+        Get futures-margin arbitrage opportunities (spot-futures spread).
         Strategy: For NEGATIVE funding rates:
         - LONG on futures (receive funding when rate is negative)
         - SHORT on margin (sell spot without funding costs)
         
-        Profit = |Funding Rate| + Price Convergence
-        We look for tokens with funding < -0.5% that are available on margin
+        Returns grouped opportunities by token with all exchange combinations.
+        Best margin exchange is the one with price spread closest to 0%.
         """
         await self.update_funding_data()
         await self.update_margin_data()
-        
-        opportunities = []
         
         # Get all exchanges with complete futures data
         futures_exchanges = []
@@ -400,9 +398,11 @@ class FundingRateManager:
         
         # Get all margin tokens available across exchanges
         all_margin_tokens = set()
+        margin_exchange_tokens = {}  # {exchange: {token: True}}
         for ex_name, ex_data in self.margin_data.items():
             margin_tokens = ex_data.get('margin_tokens', {})
             all_margin_tokens.update(margin_tokens.keys())
+            margin_exchange_tokens[ex_name] = margin_tokens
         
         logger.info(f"Futures exchanges: {futures_exchanges}")
         logger.info(f"Total margin tokens available: {len(all_margin_tokens)}")
@@ -410,6 +410,9 @@ class FundingRateManager:
         if not futures_exchanges or not all_margin_tokens:
             logger.error("Not enough data for margin opportunities")
             return []
+        
+        # Group opportunities by token symbol
+        token_opportunities = {}  # {symbol: {'best': {...}, 'all_exchanges': {...}}}
         
         # For each futures symbol with NEGATIVE funding
         for ex_name in futures_exchanges:
@@ -440,56 +443,111 @@ class FundingRateManager:
                 if futures_price <= 0:
                     continue
                 
-                # Find best spot price for margin SHORT
-                best_spot_exchange = None
-                best_spot_price = 0
+                # Initialize token entry if not exists
+                if symbol not in token_opportunities:
+                    token_opportunities[symbol] = {
+                        'symbol': symbol,
+                        'base_token': base_token,
+                        'futures_exchanges': {},  # {ex_name: {rate, price, next_funding}}
+                        'margin_exchanges': {},   # {ex_name: {price, spread}}
+                    }
                 
-                for margin_ex in self.margin_data.keys():
-                    margin_tokens = self.margin_data[margin_ex].get('margin_tokens', {})
-                    spot_prices = self.margin_data[margin_ex].get('spot_prices', {})
-                    
-                    if base_token not in margin_tokens:
-                        continue
-                    
-                    # Look for spot price (try multiple formats)
-                    spot_symbol_variants = [
-                        f"{base_token}USDT",
-                        f"{base_token}USD",
-                        f"{base_token}-USDT",
-                        f"{base_token}_USDT",
-                    ]
-                    
-                    for spot_symbol in spot_symbol_variants:
-                        if spot_symbol in spot_prices:
-                            spot_price = spot_prices[spot_symbol]
-                            if spot_price > best_spot_price:
-                                best_spot_price = spot_price
-                                best_spot_exchange = margin_ex
-                            break
+                # Add futures exchange data
+                token_opportunities[symbol]['futures_exchanges'][ex_name] = {
+                    'funding_rate': funding_rate,
+                    'price': futures_price,
+                    'next_funding': funding_info.next_funding_time
+                }
+        
+        # Now collect margin data for all tokens we found
+        for symbol, token_data in token_opportunities.items():
+            base_token = token_data['base_token']
+            
+            for margin_ex in self.margin_data.keys():
+                margin_tokens = self.margin_data[margin_ex].get('margin_tokens', {})
+                spot_prices = self.margin_data[margin_ex].get('spot_prices', {})
                 
-                if not best_spot_exchange or best_spot_price <= 0:
+                if base_token not in margin_tokens:
                     continue
                 
-                # Calculate price spread (spot vs futures)
-                price_spread = ((best_spot_price - futures_price) / futures_price) * 100
+                # Look for spot price (try multiple formats)
+                spot_symbol_variants = [
+                    f"{base_token}USDT",
+                    f"{base_token}USD",
+                    f"{base_token}-USDT",
+                    f"{base_token}_USDT",
+                ]
                 
-                # Total opportunity = |funding rate| (we receive this by going LONG on negative funding)
-                # The funding_rate is negative, so profit is -funding_rate (positive)
-                funding_profit = abs(funding_rate) * 100  # Convert to percentage
+                spot_price = 0
+                for spot_symbol in spot_symbol_variants:
+                    if spot_symbol in spot_prices:
+                        spot_price = spot_prices[spot_symbol]
+                        break
                 
-                opportunities.append({
-                    'symbol': symbol,
-                    'base_token': base_token,
-                    'funding_rate': round(funding_rate * 100, 4),  # In percentage
-                    'funding_profit': round(funding_profit, 4),
-                    'futures_exchange': ex_name,
-                    'futures_price': futures_price,
-                    'margin_exchange': best_spot_exchange,
-                    'spot_price': best_spot_price,
-                    'price_spread': round(price_spread, 4),
-                    'next_funding': funding_info.next_funding_time,
-                    'spread_magnitude': round(funding_profit, 4)  # For sorting (higher = better)
-                })
+                if spot_price > 0:
+                    token_data['margin_exchanges'][margin_ex] = {
+                        'price': spot_price
+                    }
+        
+        # Build final opportunities list
+        opportunities = []
+        
+        for symbol, token_data in token_opportunities.items():
+            if not token_data['futures_exchanges'] or not token_data['margin_exchanges']:
+                continue
+            
+            # Find the best futures exchange (most negative funding rate = highest profit)
+            best_futures_ex = None
+            best_funding_rate = 0  # Looking for most negative
+            
+            for ex_name, ex_data in token_data['futures_exchanges'].items():
+                if ex_data['funding_rate'] < best_funding_rate:
+                    best_funding_rate = ex_data['funding_rate']
+                    best_futures_ex = ex_name
+            
+            if not best_futures_ex:
+                continue
+            
+            best_futures_data = token_data['futures_exchanges'][best_futures_ex]
+            futures_price = best_futures_data['price']
+            
+            # Calculate spreads for all margin exchanges and find the one closest to 0%
+            best_margin_ex = None
+            best_spread = float('inf')  # Looking for closest to 0
+            
+            for margin_ex, margin_data in token_data['margin_exchanges'].items():
+                spot_price = margin_data['price']
+                # Spread = (spot - futures) / futures * 100
+                price_spread = ((spot_price - futures_price) / futures_price) * 100
+                margin_data['spread'] = price_spread
+                
+                # Find margin exchange with spread closest to 0%
+                if abs(price_spread) < abs(best_spread):
+                    best_spread = price_spread
+                    best_margin_ex = margin_ex
+            
+            if not best_margin_ex:
+                continue
+            
+            best_margin_data = token_data['margin_exchanges'][best_margin_ex]
+            funding_profit = abs(best_funding_rate) * 100  # Convert to percentage
+            
+            opportunities.append({
+                'symbol': symbol,
+                'base_token': token_data['base_token'],
+                'funding_rate': round(best_funding_rate * 100, 4),  # In percentage
+                'funding_profit': round(funding_profit, 4),
+                'futures_exchange': best_futures_ex,
+                'futures_price': futures_price,
+                'margin_exchange': best_margin_ex,
+                'spot_price': best_margin_data['price'],
+                'price_spread': round(best_spread, 4),
+                'next_funding': best_futures_data['next_funding'],
+                'spread_magnitude': round(funding_profit, 4),  # For sorting (higher = better)
+                # NEW: Include all exchange data for detailed view
+                'all_futures_exchanges': token_data['futures_exchanges'],
+                'all_margin_exchanges': token_data['margin_exchanges'],
+            })
         
         logger.info(f"Found {len(opportunities)} margin arbitrage opportunities")
         

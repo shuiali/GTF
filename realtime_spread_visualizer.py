@@ -753,10 +753,12 @@ class KuCoinWebSocketProvider(WebSocketProvider):
                         if welcome.get('type') != 'welcome':
                             print(f"[KuCoin] Bad welcome: {welcome}")
                         
-                        # Subscribe
+                        # Subscribe to BBO (Best Bid/Offer) for better latency
                         if market_type == MarketType.FUTURES:
+                            # For futures, use tickerV2 which has timestamps
                             topic = f"/contractMarket/tickerV2:{normalized}"
                         else:
+                            # For spot, use ticker which is faster
                             topic = f"/market/ticker:{normalized}"
                         
                         subscribe_msg = {
@@ -818,18 +820,35 @@ class KuCoinWebSocketProvider(WebSocketProvider):
     def _parse(self, data: dict, symbol: str, market_type: MarketType) -> Optional[BookTicker]:
         try:
             tick = data.get('data', {})
+            local_ts = time.time() * 1000
             
             if market_type == MarketType.FUTURES:
                 bid = float(tick.get('bestBidPrice', 0))
                 ask = float(tick.get('bestAskPrice', 0))
-                ts = float(tick.get('ts', time.time() * 1000))
+                # KuCoin futures uses 'ts' field in nanoseconds, convert to ms
+                raw_ts = tick.get('ts', 0)
+                if raw_ts > 1e15:  # Nanoseconds
+                    exchange_ts = raw_ts / 1e6
+                elif raw_ts > 1e12:  # Microseconds  
+                    exchange_ts = raw_ts / 1e3
+                else:  # Already milliseconds or seconds
+                    exchange_ts = raw_ts if raw_ts > 1e10 else raw_ts * 1000
             else:
                 bid = float(tick.get('bestBid', 0))
                 ask = float(tick.get('bestAsk', 0))
-                ts = float(tick.get('time', time.time() * 1000))
+                # KuCoin spot uses 'time' field in milliseconds
+                raw_ts = tick.get('time', 0)
+                if raw_ts > 1e12:  # Milliseconds
+                    exchange_ts = raw_ts
+                else:  # Seconds
+                    exchange_ts = raw_ts * 1000
             
             if bid <= 0 or ask <= 0:
                 return None
+            
+            # If exchange timestamp is invalid/zero, use local time
+            if exchange_ts <= 0 or exchange_ts > local_ts + 60000:  # Allow 1 min future
+                exchange_ts = local_ts
             
             return BookTicker(
                 exchange=self.EXCHANGE_NAME,
@@ -839,9 +858,11 @@ class KuCoinWebSocketProvider(WebSocketProvider):
                 bid_qty=float(tick.get('bestBidSize', tick.get('size', 0))),
                 ask_price=ask,
                 ask_qty=float(tick.get('bestAskSize', tick.get('size', 0))),
-                exchange_timestamp=ts
+                exchange_timestamp=exchange_ts,
+                local_timestamp=local_ts
             )
-        except (KeyError, ValueError):
+        except (KeyError, ValueError) as e:
+            print(f"[KuCoin] Parse error: {e}")
             return None
 
 
