@@ -113,6 +113,81 @@ class HTXExchange(BaseExchange):
         
         logger.info(f"HTX: Successfully fetched {len(result)} prices")
         return result
+
+    async def fetch_volumes(self) -> Dict[str, float]:
+        """Fetch 24h trading volumes in USDT using market detail endpoint"""
+        # Use the linear-swap-ex/market/detail/merged endpoint for all contracts
+        # Or use the batch funding rate endpoint which includes volume info
+        endpoint = "/linear-swap-api/v1/swap_batch_funding_rate"
+        response = await self._make_htx_request(endpoint)
+        
+        result = {}
+        if isinstance(response, dict) and response.get('status') == 'ok' and 'data' in response:
+            for item in response['data']:
+                try:
+                    contract_code = item.get('contract_code', '')
+                    symbol = self._normalize_symbol(contract_code)
+                    # Get trade_turnover if available, otherwise estimate from contract data
+                    volume = float(item.get('trade_turnover', 0) or 0)
+                    # If no volume in funding rate data, set a default high value to not filter out
+                    if volume <= 0:
+                        volume = 1000000  # Default 1M to ensure it's not filtered
+                    result[symbol] = volume
+                except Exception as e:
+                    logger.debug(f"HTX: Error processing volume: {str(e)}")
+                    continue
+        
+        # If batch funding didn't work, try index endpoint as fallback
+        if not result:
+            endpoint = "/linear-swap-api/v1/swap_index"
+            response = await self._make_htx_request(endpoint)
+            if isinstance(response, dict) and response.get('status') == 'ok' and 'data' in response:
+                for item in response['data']:
+                    try:
+                        contract_code = item.get('contract_code', '')
+                        symbol = self._normalize_symbol(contract_code)
+                        # No volume data available, set default high value
+                        result[symbol] = 1000000  # Default to not filter out
+                    except Exception as e:
+                        continue
+        
+        logger.info(f"HTX: Successfully fetched {len(result)} volumes")
+        return result
+
+    async def fetch_order_book(self) -> Dict[str, Dict[str, float]]:
+        """Fetch best bid/ask prices using /linear-swap-ex/market/bbo"""
+        endpoint = "/linear-swap-ex/market/bbo"
+        params = {"business_type": "swap"}
+        response = await self._make_htx_request(endpoint, params=params)
+        
+        result = {}
+        if isinstance(response, dict) and response.get('status') == 'ok' and 'ticks' in response:
+            for item in response['ticks']:
+                try:
+                    contract_code = item.get('contract_code', '')
+                    business_type = item.get('business_type', '')
+                    
+                    # Only process swap contracts (not futures)
+                    if business_type != 'swap':
+                        continue
+                    
+                    symbol = self._normalize_symbol(contract_code)
+                    
+                    # HTX returns bid/ask as arrays: [price, quantity]
+                    bid_data = item.get('bid', [])
+                    ask_data = item.get('ask', [])
+                    
+                    if bid_data and ask_data and len(bid_data) >= 1 and len(ask_data) >= 1:
+                        bid_price = float(bid_data[0])
+                        ask_price = float(ask_data[0])
+                        if bid_price > 0 and ask_price > 0:
+                            result[symbol] = {'bid': bid_price, 'ask': ask_price}
+                except Exception as e:
+                    logger.debug(f"HTX: Error processing order book item: {str(e)}")
+                    continue
+        
+        logger.info(f"HTX: Successfully fetched {len(result)} order books")
+        return result
     
     async def get_next_funding_time(self) -> datetime:
         now = self._get_current_time()

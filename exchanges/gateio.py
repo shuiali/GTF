@@ -132,6 +132,59 @@ class GateioExchange(BaseExchange):
         
         logger.info(f"Gate.io: Successfully fetched {len(result)} prices")
         return result
+
+    async def fetch_volumes(self) -> Dict[str, float]:
+        """Fetch 24h trading volumes in USDT"""
+        endpoint = "/api/v4/futures/usdt/tickers"
+        response = await self._make_gateio_request(endpoint)
+        
+        result = {}
+        if isinstance(response, list) and len(response) > 0:
+            for item in response:
+                try:
+                    gate_symbol = item.get('contract', '')
+                    if not gate_symbol or '_USDT' not in gate_symbol:
+                        continue
+                    
+                    symbol = self._normalize_symbol(gate_symbol)
+                    # volume_24h_quote is 24h volume in quote currency (USDT)
+                    volume = float(item.get('volume_24h_quote', 0) or item.get('quote_volume', 0) or 0)
+                    if volume > 0:
+                        result[symbol] = volume
+                except Exception as e:
+                    logger.debug(f"Gate.io: Error processing volume: {str(e)}")
+                    continue
+        
+        logger.info(f"Gate.io: Successfully fetched {len(result)} volumes")
+        return result
+
+    async def fetch_order_book(self) -> Dict[str, Dict[str, float]]:
+        """Fetch best bid/ask prices using tickers endpoint"""
+        endpoint = "/api/v4/futures/usdt/tickers"
+        response = await self._make_gateio_request(endpoint)
+        
+        result = {}
+        if isinstance(response, list) and len(response) > 0:
+            for item in response:
+                try:
+                    gate_symbol = item.get('contract', '')
+                    if not gate_symbol or '_USDT' not in gate_symbol:
+                        continue
+                    
+                    symbol = self._normalize_symbol(gate_symbol)
+                    
+                    # Gate.io tickers include highest_bid and lowest_ask
+                    bid_price = float(item.get('highest_bid', 0) or 0)
+                    ask_price = float(item.get('lowest_ask', 0) or 0)
+                    
+                    if bid_price > 0 and ask_price > 0:
+                        result[symbol] = {'bid': bid_price, 'ask': ask_price}
+                except Exception as e:
+                    logger.debug(f"Gate.io: Error processing order book item: {str(e)}")
+                    continue
+        
+        logger.info(f"Gate.io: Successfully fetched {len(result)} order books")
+        return result
     
     async def get_next_funding_time(self) -> datetime:
         """Get next funding time - 8-hour cycle"""

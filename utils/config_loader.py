@@ -86,3 +86,95 @@ class ConfigLoader:
             return True
         except Exception:
             return False
+    
+    @property
+    def spread_mode(self) -> str:
+        """Get current spread mode (futures-futures, margin-futures, futures-margin)"""
+        return self._config.get('spread_mode', 'futures-futures')
+    
+    def set_spread_mode(self, mode: str) -> bool:
+        """Set spread mode and save to config"""
+        valid_modes = ['futures-futures', 'margin-futures', 'futures-margin']
+        if mode not in valid_modes:
+            return False
+        
+        self._config['spread_mode'] = mode
+        
+        # Save to file
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        config_path = os.path.join(os.path.dirname(current_dir), 'config.json')
+        
+        try:
+            with open(config_path, 'w') as f:
+                json.dump(self._config, f, indent=4)
+            return True
+        except Exception:
+            return False
+    
+    @property
+    def min_spread(self) -> float:
+        """Get minimum spread percentage threshold"""
+        return self._config.get('min_spread', 0.1)  # Lower default to 0.01%
+    
+    @property
+    def max_spread(self) -> float:
+        """Get maximum spread percentage threshold"""
+        return self._config.get('max_spread', 50.0)
+    
+    def set_spread_limits(self, min_spread: float = None, max_spread: float = None) -> bool:
+        """Set min/max spread limits and save to config"""
+        if min_spread is not None:
+            self._config['min_spread'] = min_spread
+        if max_spread is not None:
+            self._config['max_spread'] = max_spread
+        
+        # Save to file
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        config_path = os.path.join(os.path.dirname(current_dir), 'config.json')
+        
+        try:
+            with open(config_path, 'w') as f:
+                json.dump(self._config, f, indent=4)
+            return True
+        except Exception:
+            return False
+    
+    @property
+    def blocked_tokens(self) -> list:
+        """Get list of blocked tokens"""
+        return self._config.get('blocked_tokens', [])
+    
+    def block_token(self, symbol: str) -> bool:
+        """Add a token to the blocked list"""
+        symbol = symbol.upper()
+        blocked = self._config.get('blocked_tokens', [])
+        if symbol not in blocked:
+            blocked.append(symbol)
+            self._config['blocked_tokens'] = blocked
+            return self._save_config()
+        return True  # Already blocked
+    
+    def unblock_token(self, symbol: str) -> bool:
+        """Remove a token from the blocked list"""
+        symbol = symbol.upper()
+        blocked = self._config.get('blocked_tokens', [])
+        if symbol in blocked:
+            blocked.remove(symbol)
+            self._config['blocked_tokens'] = blocked
+            return self._save_config()
+        return True  # Already unblocked
+    
+    def is_token_blocked(self, symbol: str) -> bool:
+        """Check if a token is blocked"""
+        return symbol.upper() in self.blocked_tokens
+    
+    def _save_config(self) -> bool:
+        """Save config to file"""
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        config_path = os.path.join(os.path.dirname(current_dir), 'config.json')
+        try:
+            with open(config_path, 'w') as f:
+                json.dump(self._config, f, indent=4)
+            return True
+        except Exception:
+            return False

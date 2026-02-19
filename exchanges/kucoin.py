@@ -130,6 +130,64 @@ class KucoinExchange(BaseExchange):
         logger.info(f"KuCoin: Successfully fetched {len(result)} prices")
         return result
 
+    async def fetch_volumes(self) -> Dict[str, float]:
+        """Fetch 24h trading volumes in USDT"""
+        endpoint = "/api/v1/contracts/active"
+        response = await self._make_request("GET", f"{self.base_url}{endpoint}")
+        
+        result = {}
+        if 'data' in response:
+            for item in response['data']:
+                try:
+                    kc_symbol = item['symbol']
+                    symbol = self._normalize_symbol(kc_symbol)
+                    # turnoverOf24h is 24h volume in quote currency (USDT)
+                    volume = float(item.get('turnoverOf24h', 0) or item.get('volumeOf24h', 0) or 0)
+                    if volume > 0:
+                        result[symbol] = volume
+                except Exception as e:
+                    logger.debug(f"KuCoin: Error processing volume: {str(e)}")
+                    continue
+        
+        logger.info(f"KuCoin: Successfully fetched {len(result)} volumes")
+        return result
+
+    async def fetch_order_book(self) -> Dict[str, Dict[str, float]]:
+        """Fetch best bid/ask prices for all futures using unified ticker endpoint"""
+        # Use the unified ticker API which returns bestBidPrice/bestAskPrice
+        spot_url = "https://api.kucoin.com"
+        endpoint = "/api/ua/v1/market/ticker"
+        params = {"tradeType": "FUTURES"}
+        
+        response = await self._make_request("GET", f"{spot_url}{endpoint}", params=params)
+        
+        result = {}
+        if 'data' in response and 'list' in response['data']:
+            for item in response['data']['list']:
+                try:
+                    kc_symbol = item.get('symbol', '')
+                    # Normalize: e.g. "BTC-USDT" -> "BTCUSDT", also handle "XBTUSDTM" style
+                    symbol = kc_symbol.replace('-', '')
+                    if symbol.endswith('M'):
+                        symbol = self._normalize_symbol(symbol)
+                    
+                    best_bid = item.get('bestBidPrice')
+                    best_ask = item.get('bestAskPrice')
+                    
+                    if best_bid and best_ask:
+                        bid_price = float(best_bid)
+                        ask_price = float(best_ask)
+                        if bid_price > 0 and ask_price > 0:
+                            result[symbol] = {'bid': bid_price, 'ask': ask_price}
+                except Exception as e:
+                    logger.debug(f"KuCoin: Error processing order book item: {str(e)}")
+                    continue
+        else:
+            logger.warning(f"KuCoin: No data/list in ticker response: {str(response)[:200]}")
+        
+        logger.info(f"KuCoin: Successfully fetched {len(result)} order books")
+        return result
+
     async def get_next_funding_time(self) -> datetime:
         return self._calculate_next_kucoin_funding_time()
     

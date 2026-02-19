@@ -25,7 +25,7 @@ class OKXExchange(BaseExchange):
         return inst_id.replace('-SWAP', '').replace('-', '')
     
     async def fetch_funding_rates(self) -> Dict[str, FundingInfo]:
-        """Fetch ALL funding rates using batch processing with NO delays"""
+        """Fetch ALL funding rates using highly parallel batch processing"""
         # First get all SWAP instruments
         endpoint = "/api/v5/public/instruments"
         params = {"instType": "SWAP"}
@@ -45,8 +45,8 @@ class OKXExchange(BaseExchange):
         
         result = {}
         
-        # Process instruments in smaller batches but faster
-        batch_size = 10  # Smaller batches
+        # Process ALL instruments in parallel (much faster)
+        batch_size = 50  # Larger batches for speed
         for i in range(0, len(usdt_instruments), batch_size):
             batch = usdt_instruments[i:i+batch_size]
             
@@ -66,9 +66,9 @@ class OKXExchange(BaseExchange):
                     elif funding_info:
                         result[funding_info.symbol] = funding_info
                 
-                # Minimal wait between batches
+                # Very minimal wait between large batches
                 if i + batch_size < len(usdt_instruments):
-                    await asyncio.sleep(0.1)  # Just 0.1 second
+                    await asyncio.sleep(0.05)  # Just 50ms
                     
             except Exception as e:
                 logger.warning(f"OKX: Batch error for instruments {i}-{i+batch_size}: {str(e)}")
@@ -96,9 +96,6 @@ class OKXExchange(BaseExchange):
                     next_funding_time=next_funding_time
                 )
             
-            # Minimal rate limiting
-            await asyncio.sleep(0.03)  # Just 30ms
-            
         except Exception as e:
             logger.debug(f"OKX: Error processing {inst_id}: {str(e)}")
             raise e
@@ -124,6 +121,54 @@ class OKXExchange(BaseExchange):
                     continue
         
         logger.info(f"OKX: Successfully fetched {len(result)} prices")
+        return result
+
+    async def fetch_volumes(self) -> Dict[str, float]:
+        """Fetch 24h trading volumes in USDT"""
+        endpoint = "/api/v5/market/tickers"
+        params = {"instType": "SWAP"}
+        response = await self._make_request("GET", f"{self.base_url}{endpoint}", params=params)
+        
+        result = {}
+        if 'data' in response:
+            for item in response['data']:
+                try:
+                    inst_id = item['instId']
+                    if inst_id.endswith('-USDT-SWAP'):
+                        symbol = self._normalize_symbol(inst_id)
+                        # volCcy24h is 24h volume in quote currency (USDT)
+                        volume = float(item.get('volCcy24h', 0))
+                        if volume > 0:
+                            result[symbol] = volume
+                except Exception as e:
+                    logger.debug(f"OKX: Error processing volume: {str(e)}")
+                    continue
+        
+        logger.info(f"OKX: Successfully fetched {len(result)} volumes")
+        return result
+
+    async def fetch_order_book(self) -> Dict[str, Dict[str, float]]:
+        """Fetch best bid/ask prices using /api/v5/market/tickers"""
+        endpoint = "/api/v5/market/tickers"
+        params = {"instType": "SWAP"}
+        response = await self._make_request("GET", f"{self.base_url}{endpoint}", params=params)
+        
+        result = {}
+        if 'data' in response:
+            for item in response['data']:
+                try:
+                    inst_id = item['instId']
+                    if inst_id.endswith('-USDT-SWAP'):
+                        symbol = self._normalize_symbol(inst_id)
+                        bid_price = float(item.get('bidPx', 0))
+                        ask_price = float(item.get('askPx', 0))
+                        if bid_price > 0 and ask_price > 0:
+                            result[symbol] = {'bid': bid_price, 'ask': ask_price}
+                except Exception as e:
+                    logger.debug(f"OKX: Error processing order book item: {str(e)}")
+                    continue
+        
+        logger.info(f"OKX: Successfully fetched {len(result)} order books")
         return result
 
     async def get_next_funding_time(self) -> datetime:

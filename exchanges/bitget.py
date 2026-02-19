@@ -129,6 +129,53 @@ class BitgetExchange(BaseExchange):
         logger.info(f"BitGet: Successfully fetched {len(result)} prices")
         return result
 
+    async def fetch_volumes(self) -> Dict[str, float]:
+        """Fetch 24h trading volumes in USDT"""
+        endpoint = "/api/v2/mix/market/tickers"
+        params = {"productType": "USDT-FUTURES"}
+        response = await self._make_bitget_request(endpoint, params=params)
+        
+        result = {}
+        if 'data' in response:
+            for item in response['data']:
+                try:
+                    bg_symbol = item['symbol']
+                    symbol = bg_symbol.replace("_UMCBL", "")
+                    # quoteVolume is 24h volume in quote currency (USDT)
+                    volume = float(item.get('quoteVolume', 0) or item.get('usdtVolume', 0) or 0)
+                    if volume > 0:
+                        result[symbol] = volume
+                except Exception as e:
+                    logger.debug(f"BitGet: Error processing volume: {str(e)}")
+                    continue
+        
+        logger.info(f"BitGet: Successfully fetched {len(result)} volumes")
+        return result
+
+    async def fetch_order_book(self) -> Dict[str, Dict[str, float]]:
+        """Fetch best bid/ask prices using /api/v2/mix/market/tickers"""
+        endpoint = "/api/v2/mix/market/tickers"
+        params = {"productType": "USDT-FUTURES"}
+        response = await self._make_bitget_request(endpoint, params=params)
+        
+        result = {}
+        if 'data' in response:
+            for item in response['data']:
+                try:
+                    bg_symbol = item['symbol']
+                    symbol = bg_symbol.replace("_UMCBL", "")
+                    
+                    bid_price = float(item.get('bidPr', 0))
+                    ask_price = float(item.get('askPr', 0))
+                    if bid_price > 0 and ask_price > 0:
+                        result[symbol] = {'bid': bid_price, 'ask': ask_price}
+                except Exception as e:
+                    logger.debug(f"BitGet: Error processing order book item: {str(e)}")
+                    continue
+        
+        logger.info(f"BitGet: Successfully fetched {len(result)} order books")
+        return result
+
     async def get_next_funding_time(self) -> datetime:
         now = self._get_current_time()
         next_hour = ((now.hour // 8) + 1) * 8

@@ -1089,7 +1089,7 @@ def main():
         resizable=True
     )
     
-    webview.start(debug=True)
+    webview.start(debug=False)
     api.cleanup()
 
 

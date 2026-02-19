@@ -153,6 +153,76 @@ class MEXCExchange(BaseExchange):
         
         logger.info(f"MEXC: Successfully fetched {len(result)} prices")
         return result
+
+    async def fetch_volumes(self) -> Dict[str, float]:
+        """Fetch 24h trading volumes in USDT"""
+        endpoint = "/api/v1/contract/ticker"
+        
+        response = await self._make_mexc_request(endpoint)
+        
+        result = {}
+        data = None
+        if isinstance(response, dict):
+            if 'data' in response:
+                data = response['data']
+            elif response.get('success') is True or response.get('code') == 0:
+                data = response.get('data', [])
+        elif isinstance(response, list):
+            data = response
+        
+        if data:
+            for item in data:
+                try:
+                    mexc_symbol = item.get('symbol', '')
+                    if not mexc_symbol:
+                        continue
+                    symbol = self._normalize_symbol(mexc_symbol)
+                    # volume24 is 24h volume in USDT
+                    volume = float(item.get('volume24', 0) or item.get('quoteVolume24h', 0) or 0)
+                    if volume > 0:
+                        result[symbol] = volume
+                except Exception as e:
+                    logger.debug(f"MEXC: Error processing volume: {str(e)}")
+                    continue
+        
+        logger.info(f"MEXC: Successfully fetched {len(result)} volumes")
+        return result
+
+    async def fetch_order_book(self) -> Dict[str, Dict[str, float]]:
+        """Fetch best bid/ask prices using ticker endpoint"""
+        endpoint = "/api/v1/contract/ticker"
+        response = await self._make_mexc_request(endpoint)
+        
+        result = {}
+        data = None
+        if isinstance(response, dict):
+            if 'data' in response:
+                data = response['data']
+            elif response.get('success') is True or response.get('code') == 0:
+                data = response.get('data', [])
+        elif isinstance(response, list):
+            data = response
+        
+        if data:
+            for item in data:
+                try:
+                    mexc_symbol = item.get('symbol', '')
+                    if not mexc_symbol:
+                        continue
+                    symbol = self._normalize_symbol(mexc_symbol)
+                    
+                    # MEXC ticker includes bid1 and ask1 prices
+                    bid_price = float(item.get('bid1', 0) or item.get('bestBidPrice', 0) or 0)
+                    ask_price = float(item.get('ask1', 0) or item.get('bestAskPrice', 0) or 0)
+                    
+                    if bid_price > 0 and ask_price > 0:
+                        result[symbol] = {'bid': bid_price, 'ask': ask_price}
+                except Exception as e:
+                    logger.debug(f"MEXC: Error processing order book: {str(e)}")
+                    continue
+        
+        logger.info(f"MEXC: Successfully fetched {len(result)} order books")
+        return result
     
     async def get_next_funding_time(self) -> datetime:
         now = self._get_current_time()

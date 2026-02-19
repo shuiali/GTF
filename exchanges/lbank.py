@@ -1,9 +1,4 @@
-import time
-import hmac
-import hashlib
 import logging
-import base64
-import json
 from typing import Dict
 from datetime import datetime
 from .base import BaseExchange, FundingInfo
@@ -11,213 +6,156 @@ from utils.config_loader import ConfigLoader
 
 logger = logging.getLogger(__name__)
 
+
 class LBankExchange(BaseExchange):
-    """LBank Exchange API Implementation for Funding Rates"""
+    """LBank Exchange - Futures price data only (no funding rates).
     
+    Uses the internal ticker endpoint to fetch last prices for futures contracts.
+    LBank does not provide best bid/ask in its ticker, so 'cu' (last price)
+    is used as both bid and ask (approximation).
+    
+    Response key: 'dataWrapper' contains the ticker groups.
+    Ticker fields: 's' = symbol, 'cu' = last price, 'a' = 24h turnover, 'v' = 24h volume.
+    """
+
     def __init__(self):
         config = ConfigLoader()
         keys = config.get_exchange_keys('lbank')
         super().__init__(api_key=keys['api_key'], api_secret=keys['secret'])
-        self.base_url = "https://lbkperp.lbank.com"
+        self.base_url = "https://uuapi.rerrkvifj.com"
         self.rate_limit_ms = 100
-    
+
     def _normalize_symbol(self, symbol: str) -> str:
-        """Normalize LBank symbol to standard format"""
-        # LBank uses format like BTCUSDT, which is already standard
+        """Normalize LBank symbol (e.g., 'BTCUSDT') to standard format"""
         return symbol.upper()
-    
+
+    async def _fetch_futures_tickers(self) -> list:
+        """Fetch all futures tickers via POST to LBank's internal API.
+        
+        Returns list of ticker dicts:
+            {'s': 'BTCUSDT', 'cu': '69339.6', 'a': '403500431...', 'v': '5814.927', ...}
+        """
+        url = f"{self.base_url}/cfd/instrment/v1/ticker/24hr/intact"
+
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:146.0) Gecko/20100101 Firefox/146.0',
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'en-US',
+            'Accept-Encoding': 'gzip, deflate',
+            'Referer': 'https://www.lbank.com/',
+            'Content-Type': 'application/json',
+            'Origin': 'https://www.lbank.com',
+            'ex-client-source': 'WEB',
+            'ex-client-type': 'WEB',
+            'ex-language': 'en-US',
+            'source': '4',
+        }
+
+        post_data = {"product": ["FUTURES"], "area": "usdt"}
+
+        response = await self._make_request("POST", url, headers=headers, data=post_data)
+
+        tickers = []
+        if not isinstance(response, dict):
+            logger.warning(f"LBank: Expected dict, got {type(response)}")
+            return tickers
+
+        # Response uses 'dataWrapper' (not 'data')
+        # Structure: {"code": 200, "dataWrapper": [{"product": "FUTURES", "tickers": [...]}]}
+        wrapper = response.get('dataWrapper') or response.get('data') or []
+        if not isinstance(wrapper, list):
+            logger.warning(f"LBank: No dataWrapper/data list in response: {str(response)[:200]}")
+            return tickers
+
+        for group in wrapper:
+            if not isinstance(group, dict):
+                continue
+            if group.get('product') == 'FUTURES':
+                group_tickers = group.get('tickers', [])
+                if isinstance(group_tickers, list):
+                    tickers.extend(group_tickers)
+
+        logger.info(f"LBank: Fetched {len(tickers)} futures tickers")
+        return tickers
+
     async def fetch_funding_rates(self) -> Dict[str, FundingInfo]:
-        """Fetch funding rates using market data endpoint"""
-        endpoint = "/cfd/openApi/v1/pub/marketData"
-        params = {"productGroup": "SwapU"}  # SwapU is for USDT perpetual contracts
-        response = await self._make_request("GET", f"{self.base_url}{endpoint}", params=params)
-        
-        result = {}
-        
-        # Check if response has the expected structure
-        if isinstance(response, dict):
-            # Response might be wrapped in success/data structure
-            if 'data' in response and isinstance(response['data'], list):
-                market_data = response['data']
-            elif isinstance(response.get('result'), str) and response.get('result') == 'true':
-                # The response itself contains the market data (as seen in your log)
-                # Extract all keys that look like market data (not meta fields)
-                market_data = []
-                for key, value in response.items():
-                    if key not in ['result', 'error_code', 'msg', 'success'] and isinstance(value, list):
-                        market_data = value
-                        break
-                # If no list found in response, try to extract from response directly
-                if not market_data:
-                    # Look for any list in the response
-                    for value in response.values():
-                        if isinstance(value, list):
-                            market_data = value
-                            break
-            else:
-                logger.warning(f"LBank: Unexpected response structure: {response}")
-                return result
-        elif isinstance(response, list):
-            market_data = response
-        else:
-            logger.warning(f"LBank: Expected dict or list, got {type(response)}: {response}")
-            return result
-        
-        if market_data:
-            logger.info(f"LBank: Processing {len(market_data)} market data items")
-            for item in market_data:
-                try:
-                    if not isinstance(item, dict):
-                        continue
-                        
-                    symbol = item.get('symbol', '')
-                    if not symbol:
-                        continue
-                    
-                    # Normalize symbol
-                    normalized_symbol = self._normalize_symbol(symbol)
-                    
-                    # Get funding rate - try multiple field names
-                    funding_rate = 0.0
-                    funding_rate_fields = ['fundingRate', 'positionFeeRate', 'prePositionFeeRate']
-                    
-                    for field in funding_rate_fields:
-                        if field in item and item[field] is not None:
-                            try:
-                                funding_rate = float(item[field])
-                                break
-                            except (ValueError, TypeError):
-                                continue
-                    
-                    # Get next funding time from nextFeeTime (timestamp in milliseconds)
-                    next_funding_time = None
-                    if 'nextFeeTime' in item and item['nextFeeTime']:
-                        try:
-                            timestamp_ms = int(item['nextFeeTime'])
-                            next_funding_time = self._timestamp_to_datetime(timestamp_ms, is_milliseconds=True)
-                        except (ValueError, TypeError, OverflowError):
-                            pass
-                    
-                    # If no valid timestamp, calculate next funding time
-                    if not next_funding_time:
-                        now = self._get_current_time()
-                        current_hour = now.hour
-                        if current_hour < 8:
-                            next_funding_hour = 8
-                        elif current_hour < 16:
-                            next_funding_hour = 16
-                        else:
-                            next_funding_hour = 24
-                        
-                        next_funding_time = now.replace(hour=next_funding_hour % 24, minute=0, second=0, microsecond=0)
-                        if next_funding_hour == 24:
-                            next_funding_time = next_funding_time.replace(day=next_funding_time.day + 1)
-                    
-                    result[normalized_symbol] = FundingInfo(
-                        symbol=normalized_symbol,
-                        funding_rate=funding_rate,
-                        next_funding_time=next_funding_time
-                    )
-                    
-                    logger.debug(f"LBank: {normalized_symbol} - funding_rate: {funding_rate}, next_time: {next_funding_time}")
-                    
-                except Exception as e:
-                    logger.debug(f"LBank: Error processing funding rate item {item}: {str(e)}")
-                    continue
-        else:
-            logger.warning(f"LBank: No market data found in response")
-        
-        logger.info(f"LBank: Successfully fetched {len(result)} funding rates")
-        return result
-    
+        """Not implemented - LBank is used for price spreads only."""
+        return {}
+
     async def fetch_prices(self) -> Dict[str, float]:
-        """Fetch prices using market data endpoint"""
-        endpoint = "/cfd/openApi/v1/pub/marketData"
-        params = {"productGroup": "SwapU"}  # SwapU is for USDT perpetual contracts
-        response = await self._make_request("GET", f"{self.base_url}{endpoint}", params=params)
-        
+        """Fetch last prices for all LBank futures contracts."""
+        tickers = await self._fetch_futures_tickers()
+
         result = {}
-        
-        # Check if response has the expected structure (same logic as funding_rates)
-        if isinstance(response, dict):
-            # Response might be wrapped in success/data structure
-            if 'data' in response and isinstance(response['data'], list):
-                market_data = response['data']
-            elif isinstance(response.get('result'), str) and response.get('result') == 'true':
-                # Extract market data from response
-                market_data = []
-                for key, value in response.items():
-                    if key not in ['result', 'error_code', 'msg', 'success'] and isinstance(value, list):
-                        market_data = value
-                        break
-                # If no list found, try to extract from response directly
-                if not market_data:
-                    for value in response.values():
-                        if isinstance(value, list):
-                            market_data = value
-                            break
-            else:
-                logger.warning(f"LBank: Unexpected response structure for prices: {response}")
-                return result
-        elif isinstance(response, list):
-            market_data = response
-        else:
-            logger.warning(f"LBank: Expected dict or list for prices, got {type(response)}: {response}")
-            return result
-        
-        if market_data:
-            logger.info(f"LBank: Processing {len(market_data)} market data items for prices")
-            for item in market_data:
-                try:
-                    if not isinstance(item, dict):
-                        continue
-                        
-                    symbol = item.get('symbol', '')
-                    if not symbol:
-                        continue
-                    
-                    # Normalize symbol
-                    normalized_symbol = self._normalize_symbol(symbol)
-                    
-                    # Get price - try multiple price fields
-                    price = None
-                    price_fields = ['markedPrice', 'lastPrice', 'underlyingPrice']
-                    
-                    for field in price_fields:
-                        if field in item and item[field] is not None:
-                            try:
-                                price_val = float(item[field])
-                                if price_val > 0:
-                                    price = price_val
-                                    break
-                            except (ValueError, TypeError):
-                                continue
-                    
-                    if price and price > 0:
-                        result[normalized_symbol] = price
-                        logger.debug(f"LBank: {normalized_symbol} - price: {price}")
-                        
-                except Exception as e:
-                    logger.debug(f"LBank: Error processing price item {item}: {str(e)}")
+        for item in tickers:
+            try:
+                symbol_raw = item.get('s', '')
+                if not symbol_raw:
                     continue
-        else:
-            logger.warning(f"LBank: No market data found for prices")
-        
+                symbol = self._normalize_symbol(symbol_raw)
+
+                # 'cu' = current/last price, 'c' = close price (fallback)
+                price = float(item.get('cu', 0) or item.get('c', 0) or 0)
+                if price > 0:
+                    result[symbol] = price
+            except Exception as e:
+                logger.debug(f"LBank: Error processing price: {str(e)}")
+                continue
+
         logger.info(f"LBank: Successfully fetched {len(result)} prices")
         return result
-    
-    async def get_next_funding_time(self) -> datetime:
-        """Calculate next funding time - assuming 8-hour cycles"""
-        now = self._get_current_time()
-        current_hour = now.hour
-        if current_hour < 8:
-            next_funding_hour = 8
-        elif current_hour < 16:
-            next_funding_hour = 16
-        else:
-            next_funding_hour = 24
+
+    async def fetch_volumes(self) -> Dict[str, float]:
+        """Fetch 24h trading volumes (turnover in USDT)."""
+        tickers = await self._fetch_futures_tickers()
+
+        result = {}
+        for item in tickers:
+            try:
+                symbol_raw = item.get('s', '')
+                if not symbol_raw:
+                    continue
+                symbol = self._normalize_symbol(symbol_raw)
+
+                # 'a' = 24h turnover in quote currency (USDT)
+                volume = float(item.get('a', 0) or 0)
+                if volume > 0:
+                    result[symbol] = volume
+            except Exception as e:
+                logger.debug(f"LBank: Error processing volume: {str(e)}")
+                continue
+
+        logger.info(f"LBank: Successfully fetched {len(result)} volumes")
+        return result
+
+    async def fetch_order_book(self) -> Dict[str, Dict[str, float]]:
+        """Fetch 'order book' for all LBank futures.
         
-        next_funding_time = now.replace(hour=next_funding_hour % 24, minute=0, second=0, microsecond=0)
-        if next_funding_hour == 24:
-            next_funding_time = next_funding_time.replace(day=next_funding_time.day + 1)
-        return next_funding_time
+        LBank does not provide bid/ask prices, so the last price ('cu')
+        is used as both bid and ask. This is an approximation.
+        """
+        tickers = await self._fetch_futures_tickers()
+
+        result = {}
+        for item in tickers:
+            try:
+                symbol_raw = item.get('s', '')
+                if not symbol_raw:
+                    continue
+                symbol = self._normalize_symbol(symbol_raw)
+
+                last_price = float(item.get('cu', 0) or item.get('c', 0) or 0)
+                if last_price > 0:
+                    result[symbol] = {'bid': last_price, 'ask': last_price}
+            except Exception as e:
+                logger.debug(f"LBank: Error processing order book: {str(e)}")
+                continue
+
+        logger.info(f"LBank: Successfully fetched {len(result)} order books (last price as bid/ask)")
+        return result
+
+    async def get_next_funding_time(self) -> datetime:
+        """Calculate next funding time (8-hour cycles)."""
+        now = self._get_current_time()
+        next_hour = ((now.hour // 8) + 1) * 8
+        return now.replace(hour=next_hour % 24, minute=0, second=0, microsecond=0)

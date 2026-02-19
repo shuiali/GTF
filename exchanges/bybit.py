@@ -109,6 +109,55 @@ class BybitExchange(BaseExchange):
         logger.info(f"Bybit: Successfully fetched {len(result)} prices")
         return result
 
+    async def fetch_volumes(self) -> Dict[str, float]:
+        """Fetch 24h trading volumes in USDT"""
+        endpoint = "/v5/market/tickers"
+        params = {"category": "linear"}
+        response = await self._make_request("GET", f"{self.base_url}{endpoint}", params=params)
+        
+        result = {}
+        if 'result' in response and 'list' in response['result']:
+            for item in response['result']['list']:
+                try:
+                    symbol = item['symbol']
+                    if not symbol.endswith('USDT'):
+                        continue
+                    # turnover24h is the 24h volume in quote currency (USDT)
+                    volume = float(item.get('turnover24h', 0))
+                    if volume > 0:
+                        result[symbol] = volume
+                except Exception as e:
+                    logger.debug(f"Bybit: Error processing volume: {str(e)}")
+                    continue
+        
+        logger.info(f"Bybit: Successfully fetched {len(result)} volumes")
+        return result
+
+    async def fetch_order_book(self) -> Dict[str, Dict[str, float]]:
+        """Fetch best bid/ask prices using /v5/market/tickers"""
+        endpoint = "/v5/market/tickers"
+        params = {"category": "linear"}
+        response = await self._make_request("GET", f"{self.base_url}{endpoint}", params=params)
+        
+        result = {}
+        if 'result' in response and 'list' in response['result']:
+            for item in response['result']['list']:
+                try:
+                    symbol = item['symbol']
+                    if not symbol.endswith('USDT'):
+                        continue
+                    
+                    bid_price = float(item.get('bid1Price', 0))
+                    ask_price = float(item.get('ask1Price', 0))
+                    if bid_price > 0 and ask_price > 0:
+                        result[symbol] = {'bid': bid_price, 'ask': ask_price}
+                except Exception as e:
+                    logger.debug(f"Bybit: Error processing order book item: {str(e)}")
+                    continue
+        
+        logger.info(f"Bybit: Successfully fetched {len(result)} order books")
+        return result
+
     async def get_next_funding_time(self) -> datetime:
         """Calculate next funding time - Bybit uses 8-hour cycles"""
         now = self._get_current_time()

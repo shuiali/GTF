@@ -80,6 +80,52 @@ class BinanceExchange(BaseExchange):
         logger.info(f"Binance: Successfully fetched {len(result)} prices")
         return result
 
+    async def fetch_volumes(self) -> Dict[str, float]:
+        """Fetch 24h trading volumes in USDT using /fapi/v1/ticker/24hr"""
+        endpoint = "/fapi/v1/ticker/24hr"
+        url = f"{self.base_url}{endpoint}"
+        
+        response = await self._make_request("GET", url)
+        
+        result = {}
+        if isinstance(response, list):
+            for item in response:
+                try:
+                    symbol = item.get('symbol', '')
+                    # quoteVolume is the 24h volume in USDT
+                    volume = float(item.get('quoteVolume', 0))
+                    if symbol and volume > 0:
+                        result[symbol] = volume
+                except Exception as e:
+                    logger.debug(f"Binance: Error processing volume item: {str(e)}")
+                    continue
+        
+        logger.info(f"Binance: Successfully fetched {len(result)} volumes")
+        return result
+
+    async def fetch_order_book(self) -> Dict[str, Dict[str, float]]:
+        """Fetch best bid/ask prices using /fapi/v1/ticker/bookTicker"""
+        endpoint = "/fapi/v1/ticker/bookTicker"
+        url = f"{self.base_url}{endpoint}"
+        
+        response = await self._make_request("GET", url)
+        
+        result = {}
+        if isinstance(response, list):
+            for item in response:
+                try:
+                    symbol = item.get('symbol', '')
+                    bid_price = float(item.get('bidPrice', 0))
+                    ask_price = float(item.get('askPrice', 0))
+                    if symbol and bid_price > 0 and ask_price > 0:
+                        result[symbol] = {'bid': bid_price, 'ask': ask_price}
+                except Exception as e:
+                    logger.debug(f"Binance: Error processing order book item: {str(e)}")
+                    continue
+        
+        logger.info(f"Binance: Successfully fetched {len(result)} order books")
+        return result
+
     async def get_next_funding_time(self) -> datetime:
         now = self._get_current_time()
         next_hour = ((now.hour // 8) + 1) * 8

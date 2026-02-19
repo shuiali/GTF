@@ -33,7 +33,7 @@ class BaseExchange(ABC):
         self.request_timeout = request_timeout
         self.session: Optional[aiohttp.ClientSession] = None
         self.last_request_time: float = 0.0
-        self.rate_limit_ms: int = 50  # Fast rate limit
+        self.rate_limit_ms: int = 0  # NO RATE LIMIT - maximum speed
         self.utc = pytz.UTC
     
     def _get_current_time(self) -> datetime:
@@ -97,10 +97,12 @@ class BaseExchange(ABC):
     async def _make_request(self, method: str, url: str, params: Dict = None, headers: Dict = None, data: Dict = None) -> Dict:
         await self._init_session()
         
-        # Minimal rate limiting
-        current_time = time.time() * 1000
-        if current_time - self.last_request_time < self.rate_limit_ms:
-            await asyncio.sleep((self.rate_limit_ms - (current_time - self.last_request_time)) / 1000)
+        # NO RATE LIMITING - maximum speed
+        # (rate_limit_ms = 0 means no delay)
+        if self.rate_limit_ms > 0:
+            current_time = time.time() * 1000
+            if current_time - self.last_request_time < self.rate_limit_ms:
+                await asyncio.sleep((self.rate_limit_ms - (current_time - self.last_request_time)) / 1000)
         
         try:
             logger.debug(f"Making request to: {url}")
@@ -145,6 +147,18 @@ class BaseExchange(ABC):
     async def fetch_spot_prices(self) -> Dict[str, float]:
         """Fetch spot prices for tokens. Override in exchanges that support spot.
         Returns dict of symbols (e.g., 'BTCUSDT') to price"""
+        return {}
+    
+    async def fetch_volumes(self) -> Dict[str, float]:
+        """Fetch 24h trading volumes in USDT for futures.
+        Override in exchanges to enable volume filtering.
+        Returns dict of symbols (e.g., 'BTCUSDT') to 24h volume in USDT"""
+        return {}
+    
+    async def fetch_order_book(self) -> Dict[str, Dict[str, float]]:
+        """Fetch best bid/ask prices for all futures symbols.
+        Returns dict of symbols (e.g., 'BTCUSDT') to {'bid': price, 'ask': price}
+        This is used for accurate spread calculation in arbitrage."""
         return {}
     
     async def close(self):
